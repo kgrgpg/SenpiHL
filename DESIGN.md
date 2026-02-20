@@ -247,6 +247,60 @@ We need both trade-level fidelity and efficient PnL queries across timeframes.
 
 ---
 
+## 10. Adaptive Rate Budget
+
+### Context
+
+Hyperliquid allows ~1,200 requests/minute per IP (no auth required). This budget must be shared between real-time polling, background backfill, and on-demand user requests. A rigid allocation wastes capacity when idle and starves users during bursts.
+
+### Options Considered
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **Fixed allocation** (current: 2 workers) | Simple, predictable | Wastes 80% of budget when idle |
+| **Adaptive budget** | Maximizes throughput, prioritizes users | Slightly more complex |
+| **External rate limiter** (e.g. Bottleneck) | Battle-tested library | Extra dependency for simple logic |
+
+### Decision
+
+**Chosen: Adaptive rate budget with 80% utilization target**
+
+### How It Works
+
+```
+Total budget: 1,200 req/min
+Target utilization: 80% = 960 req/min
+Safety margin: 20% = 240 req/min (burst headroom)
+
+Backfill budget = 960 - polling_used - ondemand_used
+Worker count = backfill_budget / 120 (each worker ~120 req/min)
+```
+
+Priority levels (highest first):
+1. **User requests** (on-demand fetch for unknown traders)
+2. **Position polling** (real-time snapshot updates)
+3. **Backfill workers** (historical data, scales up/down)
+
+### Scenarios
+
+| State | Polling | On-Demand | Backfill | Workers | Utilization |
+|-------|---------|-----------|----------|---------|-------------|
+| Idle | 114/min | 0/min | 846/min | 7 | 80% |
+| Moderate | 114/min | 100/min | 746/min | 6 | 80% |
+| Burst | 114/min | 500/min | 346/min | 3 | 80% |
+
+### On-Demand Fetching
+
+When a user queries an unknown trader (`GET /traders/:address/pnl`), instead of returning 404:
+1. Fetch `clearinghouseState` from Hyperliquid (1 request)
+2. Fetch recent fills (1 request)
+3. Calculate PnL, store snapshot, return to user (~2 seconds)
+4. Schedule 30-day backfill in background
+
+This means any trader address works on first request.
+
+---
+
 ## Decision Summary
 
 | Topic | Decision | Key Reasoning |
@@ -260,3 +314,4 @@ We need both trade-level fidelity and efficient PnL queries across timeframes.
 | Caching | Redis + TTL | Simple, append-only is cache-friendly |
 | Error Handling | Defense in depth | Retry, circuit breaker, graceful degradation |
 | Data Storage | Trades + Snapshots | Audit trail + read-optimized projections |
+| Rate Budget | Adaptive 80% target | Maximize throughput, prioritize users |

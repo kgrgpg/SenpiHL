@@ -83,6 +83,22 @@ Unrealized PnL = Σ (mark_price - entry_price) × size × direction
 
 ---
 
-## 6. Full Documentation
+## 6. Adaptive Rate Budget
+
+Hyperliquid allows ~1,200 req/min. We target **80% utilization** (960 req/min):
+
+| Consumer | Priority | Typical Usage |
+|----------|----------|--------------|
+| On-demand user requests | Highest | 0-500 req/min |
+| Position polling | Medium | ~114 req/min |
+| Backfill workers | Fills remaining | 346-846 req/min |
+
+Backfill concurrency auto-adjusts every 10 seconds. When users request unknown traders, backfill scales down. When idle, it scales up to 7 workers.
+
+Unknown traders return live data on first request (no 404) -- fetched from Hyperliquid in ~2s, then backfilled in background.
+
+---
+
+## 7. Full Documentation
 
 For the complete architecture including data flow diagrams, storage trade-off analysis, caching strategy, and query performance benchmarks, see [ARCHITECTURE.md](./ARCHITECTURE.md).

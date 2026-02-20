@@ -98,7 +98,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
                 <th class="text-left px-4 py-2 w-12">#</th>
                 <th class="text-left px-4 py-2">Address</th>
                 <th class="text-right px-4 py-2">Delta PnL</th>
-                <th class="text-right px-4 py-2 hidden sm:table-cell">Volume</th>
               </tr>
             </thead>
             <tbody>
@@ -107,11 +106,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
                   <td class="px-4 py-2.5 text-slate-500 font-mono text-xs" x-text="entry.rank"></td>
                   <td class="px-4 py-2.5 font-mono text-xs text-slate-300" x-text="entry.address.slice(0,6) + '...' + entry.address.slice(-4)"></td>
                   <td class="px-4 py-2.5 text-right font-mono text-xs" :class="parseFloat(entry.total_pnl) >= 0 ? 'text-emerald-400' : 'text-red-400'" x-text="'$' + fmtPnl(entry.total_pnl)"></td>
-                  <td class="px-4 py-2.5 text-right font-mono text-xs text-slate-400 hidden sm:table-cell" x-text="'$' + fmtPnl(entry.volume || '0')"></td>
                 </tr>
               </template>
               <tr x-show="leaderboard.length === 0">
-                <td colspan="4" class="px-4 py-8 text-center text-slate-600">Loading...</td>
+                <td colspan="3" class="px-4 py-8 text-center text-slate-600">Loading...</td>
               </tr>
             </tbody>
           </table>

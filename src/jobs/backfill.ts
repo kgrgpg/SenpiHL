@@ -10,6 +10,7 @@ import { firstValueFrom, from, forkJoin, of, Observable } from 'rxjs';
 import { mergeMap, map, catchError, delay, mergeScan, reduce } from 'rxjs/operators';
 
 import { fetchUserFills, fetchUserFunding } from '../hyperliquid/client.js';
+import { rateBudget } from '../utils/rate-budget.js';
 import {
   parseTradeFromApi,
   parseFundingFromApi,
@@ -65,8 +66,8 @@ function processChunk$(
 ): Observable<ChunkResult> {
   // Fetch fills and funding in parallel using forkJoin
   return forkJoin({
-    fills: fetchUserFills(address, chunk.start, chunk.end),
-    funding: fetchUserFunding(address, chunk.start, chunk.end),
+    fills: fetchUserFills(address, chunk.start, chunk.end, 'backfill'),
+    funding: fetchUserFunding(address, chunk.start, chunk.end, 'backfill'),
   }).pipe(
     mergeMap(({ fills, funding }) => {
       let state = initialState;
@@ -240,13 +241,27 @@ async function processBackfillJob(job: Job<BackfillJobData>): Promise<void> {
 }
 
 export function createBackfillWorker(): Worker<BackfillJobData> {
+  const initialWorkers = rateBudget.getRecommendedWorkers();
+
   const worker = new Worker<BackfillJobData>(QUEUE_NAME, processBackfillJob, {
     connection: {
       host: new URL(config.REDIS_URL).hostname,
       port: parseInt(new URL(config.REDIS_URL).port || '6379'),
     },
-    concurrency: 2,
+    concurrency: initialWorkers,
   });
+
+  // Adjust concurrency every 10 seconds based on rate budget
+  const adjustInterval = setInterval(() => {
+    const recommended = rateBudget.getRecommendedWorkers();
+    if (recommended !== worker.concurrency) {
+      logger.info(
+        { from: worker.concurrency, to: recommended, ...rateBudget.getStats() },
+        'Adjusting backfill worker concurrency'
+      );
+      worker.concurrency = recommended;
+    }
+  }, 10_000);
 
   worker.on('completed', (job) => {
     logger.info({ jobId: job.id, address: job.data.address }, 'Backfill job completed');
@@ -262,6 +277,8 @@ export function createBackfillWorker(): Worker<BackfillJobData> {
   worker.on('progress', (job, progress) => {
     logger.debug({ jobId: job.id, progress }, 'Backfill job progress');
   });
+
+  worker.on('closing', () => clearInterval(adjustInterval));
 
   return worker;
 }

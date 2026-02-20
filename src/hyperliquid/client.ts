@@ -3,6 +3,8 @@ import { catchError, map, retry, tap } from 'rxjs/operators';
 
 import { config } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
+import { rateBudget } from '../utils/rate-budget.js';
+import type { RequestPriority } from '../utils/rate-budget.js';
 
 import type {
   HyperliquidClearinghouseState,
@@ -14,7 +16,9 @@ import type {
 
 const API_URL = config.HYPERLIQUID_API_URL;
 
-async function postInfo<T>(request: HyperliquidInfoRequest): Promise<T> {
+async function postInfo<T>(request: HyperliquidInfoRequest, priority: RequestPriority = 'polling'): Promise<T> {
+  rateBudget.record(priority);
+
   const response = await fetch(`${API_URL}/info`, {
     method: 'POST',
     headers: {
@@ -58,7 +62,8 @@ export function fetchClearinghouseState(
 export function fetchUserFills(
   userAddress: string,
   startTime?: number,
-  endTime?: number
+  endTime?: number,
+  priority: RequestPriority = 'polling'
 ): Observable<HyperliquidFill[]> {
   const request: HyperliquidInfoRequest = {
     type: 'userFillsByTime',
@@ -67,7 +72,7 @@ export function fetchUserFills(
     ...(endTime && { endTime }),
   };
 
-  return from(postInfo<HyperliquidFill[]>(request)).pipe(
+  return from(postInfo<HyperliquidFill[]>(request, priority)).pipe(
     tap(fills => logger.debug({ user: userAddress, count: fills.length }, 'Fetched user fills')),
     retry({
       count: 3,
@@ -86,7 +91,8 @@ export function fetchUserFills(
 export function fetchUserFunding(
   userAddress: string,
   startTime?: number,
-  endTime?: number
+  endTime?: number,
+  priority: RequestPriority = 'polling'
 ): Observable<HyperliquidFunding[]> {
   const request: HyperliquidInfoRequest = {
     type: 'userFunding',
@@ -95,7 +101,7 @@ export function fetchUserFunding(
     ...(endTime && { endTime }),
   };
 
-  return from(postInfo<HyperliquidFunding[]>(request)).pipe(
+  return from(postInfo<HyperliquidFunding[]>(request, priority)).pipe(
     tap(funding =>
       logger.debug({ user: userAddress, count: funding.length }, 'Fetched user funding')
     ),

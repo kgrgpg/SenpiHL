@@ -6,6 +6,7 @@ import { getTraderDiscoveryStream } from '../../../streams/sources/trader-discov
 import { getHyperliquidWebSocket } from '../../../hyperliquid/websocket.js';
 import { getTrackedTraderCount, getAllTrackedAddresses } from '../../../state/trader-state.js';
 import { query } from '../../../storage/db/client.js';
+import { rateBudget } from '../../../utils/rate-budget.js';
 
 export async function statusRoutes(fastify: FastifyInstance): Promise<void> {
   /**
@@ -48,6 +49,7 @@ export async function statusRoutes(fastify: FastifyInstance): Promise<void> {
         is_running: false,
         discovered_count: 0,
       },
+      rate_budget: rateBudget.getStats(),
       config: {
         poll_interval_ms: config.POLL_INTERVAL_MS,
         snapshot_interval: config.SNAPSHOT_INTERVAL,

@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 
-import { hyperliquidClient } from '../../../hyperliquid/client.js';
+import { firstValueFrom } from 'rxjs';
+
+import { hyperliquidClient, fetchClearinghouseState, fetchUserFills } from '../../../hyperliquid/client.js';
 import { tradersRepo, snapshotsRepo } from '../../../storage/db/repositories/index.js';
 import { getHybridDataStream } from '../../../streams/sources/hybrid.stream.js';
 import {
@@ -9,6 +11,14 @@ import {
   removeTraderState,
 } from '../../../state/trader-state.js';
 import { scheduleBackfill, getBackfillStatus } from '../../../jobs/backfill.js';
+import {
+  createInitialState,
+  applyTrade,
+  parseTradeFromApi,
+  parsePositionFromApi,
+  updatePositions,
+  calculatePnL,
+} from '../../../pnl/calculator.js';
 import { toDecimal } from '../../../utils/decimal.js';
 import { config } from '../../../utils/config.js';
 import { logger } from '../../../utils/logger.js';
@@ -40,9 +50,66 @@ export async function tradersRoutes(fastify: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: 'Invalid Ethereum address' });
     }
 
-    const trader = await tradersRepo.findByAddress(address);
+    let trader = await tradersRepo.findByAddress(address);
+
+    // On-demand: fetch live data for unknown traders instead of returning 404
     if (!trader) {
-      return reply.status(404).send({ error: 'Trader not found. Subscribe first.' });
+      try {
+        const clearinghouse = await firstValueFrom(fetchClearinghouseState(address));
+        const recentFills = await firstValueFrom(fetchUserFills(address, Date.now() - 24 * 60 * 60 * 1000, undefined, 'user'));
+
+        trader = await tradersRepo.findOrCreate(address);
+        let state = createInitialState(trader.id, address);
+
+        for (const fill of recentFills.sort((a, b) => a.time - b.time)) {
+          state = applyTrade(state, parseTradeFromApi(
+            fill.coin, fill.side, fill.sz, fill.px, fill.closedPnl,
+            fill.fee, fill.time, fill.tid, fill.liquidation ?? false, fill.dir, fill.startPosition
+          ));
+        }
+
+        const positions = clearinghouse.assetPositions.map(ap => {
+          const pos = ap.position;
+          return parsePositionFromApi(
+            pos.coin, pos.szi, pos.entryPx, pos.unrealizedPnl,
+            pos.leverage.value, pos.liquidationPx, pos.marginUsed, pos.leverage.type
+          );
+        });
+        state = updatePositions(state, positions);
+        initializeTraderState(trader.id, address);
+
+        const pnl = calculatePnL(state);
+
+        // Schedule full backfill in background
+        scheduleBackfill(address, config.BACKFILL_DAYS).catch(err =>
+          logger.warn({ err: (err as Error).message }, 'Failed to schedule backfill for on-demand trader')
+        );
+
+        // Return live data immediately
+        const accountValue = toDecimal(clearinghouse.marginSummary.accountValue);
+        return {
+          trader: address,
+          timeframe,
+          data: [{
+            timestamp: Math.floor(Date.now() / 1000),
+            realized_pnl: pnl.realizedPnl.toString(),
+            unrealized_pnl: pnl.unrealizedPnl.toString(),
+            total_pnl: pnl.totalPnl.toString(),
+            positions: positions.length,
+            volume: state.totalVolume.toString(),
+          }],
+          summary: {
+            total_realized: pnl.realizedPnl.toString(),
+            peak_pnl: pnl.totalPnl.toString(),
+            max_drawdown: '0',
+            current_pnl: pnl.totalPnl.toString(),
+          },
+          note: 'Live data fetched on-demand. Full history will be available after backfill completes.',
+        };
+      } catch (err) {
+        logger.warn({ address, err: (err as Error).message }, 'On-demand fetch failed');
+        return reply.status(404).send({ error: 'Trader not found and live fetch failed.' });
+      }
     }
 
     const days = timeframe === '1h' ? 1 / 24 : timeframe === '1d' ? 1 : timeframe === '7d' ? 7 : 30;
