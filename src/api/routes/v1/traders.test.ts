@@ -1,0 +1,275 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import Fastify from 'fastify';
+
+import { tradersRoutes } from './traders.js';
+
+vi.mock('../../../hyperliquid/client.js', () => ({
+  hyperliquidClient: {
+    isValidAddress: vi.fn(),
+  },
+}));
+
+vi.mock('../../../streams/index.js', () => ({
+  initializeTraderState: vi.fn(),
+  getTraderState: vi.fn(),
+}));
+
+vi.mock('../../../storage/db/repositories/index.js', () => ({
+  tradersRepo: {
+    findByAddress: vi.fn(),
+    findOrCreate: vi.fn(),
+  },
+  snapshotsRepo: {
+    getForTrader: vi.fn(),
+    getSummary: vi.fn(),
+    getLatest: vi.fn(),
+  },
+}));
+
+import { hyperliquidClient } from '../../../hyperliquid/client.js';
+import { initializeTraderState, getTraderState } from '../../../streams/index.js';
+import { tradersRepo, snapshotsRepo } from '../../../storage/db/repositories/index.js';
+import { toDecimal } from '../../../utils/decimal.js';
+
+describe('Traders Routes', () => {
+  let app: ReturnType<typeof Fastify>;
+
+  beforeEach(async () => {
+    app = Fastify();
+    await app.register(tradersRoutes);
+    await app.ready();
+  });
+
+  afterEach(async () => {
+    await app.close();
+    vi.clearAllMocks();
+  });
+
+  describe('GET /traders/:address/pnl', () => {
+    it('should return 400 for invalid address', async () => {
+      vi.mocked(hyperliquidClient.isValidAddress).mockReturnValue(false);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/traders/invalid-address/pnl',
+      });
+
+      expect(response.statusCode).toBe(400);
+      const body = JSON.parse(response.body);
+      expect(body.error).toBe('Invalid Ethereum address');
+    });
+
+    it('should return 404 for unknown trader', async () => {
+      vi.mocked(hyperliquidClient.isValidAddress).mockReturnValue(true);
+      vi.mocked(tradersRepo.findByAddress).mockResolvedValue(null);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/traders/0x1234567890123456789012345678901234567890/pnl',
+      });
+
+      expect(response.statusCode).toBe(404);
+      const body = JSON.parse(response.body);
+      expect(body.error).toContain('not found');
+    });
+
+    it('should return PnL data for valid trader', async () => {
+      vi.mocked(hyperliquidClient.isValidAddress).mockReturnValue(true);
+      vi.mocked(tradersRepo.findByAddress).mockResolvedValue({
+        id: 1,
+        address: '0x1234567890123456789012345678901234567890',
+        first_seen_at: new Date(),
+        last_updated_at: new Date(),
+        is_active: true,
+      });
+      vi.mocked(snapshotsRepo.getForTrader).mockResolvedValue([
+        {
+          trader_id: 1,
+          timestamp: new Date('2024-01-01T00:00:00Z'),
+          realized_pnl: '100',
+          unrealized_pnl: '50',
+          total_pnl: '150',
+          funding_pnl: '10',
+          trading_pnl: '90',
+          open_positions: 2,
+          total_volume: '10000',
+          account_value: '5000',
+        },
+      ]);
+      vi.mocked(snapshotsRepo.getSummary).mockResolvedValue({
+        peakPnl: '200',
+        troughPnl: '-50',
+        totalRealized: '100',
+      });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/traders/0x1234567890123456789012345678901234567890/pnl',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.trader).toBe('0x1234567890123456789012345678901234567890');
+      expect(body.data).toHaveLength(1);
+      expect(body.summary).toBeDefined();
+    });
+
+    it('should accept timeframe query parameter', async () => {
+      vi.mocked(hyperliquidClient.isValidAddress).mockReturnValue(true);
+      vi.mocked(tradersRepo.findByAddress).mockResolvedValue({
+        id: 1,
+        address: '0x1234567890123456789012345678901234567890',
+        first_seen_at: new Date(),
+        last_updated_at: new Date(),
+        is_active: true,
+      });
+      vi.mocked(snapshotsRepo.getForTrader).mockResolvedValue([]);
+      vi.mocked(snapshotsRepo.getSummary).mockResolvedValue(null);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/traders/0x1234567890123456789012345678901234567890/pnl?timeframe=7d',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.timeframe).toBe('7d');
+    });
+  });
+
+  describe('GET /traders/:address/stats', () => {
+    it('should return 400 for invalid address', async () => {
+      vi.mocked(hyperliquidClient.isValidAddress).mockReturnValue(false);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/traders/invalid/stats',
+      });
+
+      expect(response.statusCode).toBe(400);
+    });
+
+    it('should return 404 for unknown trader', async () => {
+      vi.mocked(hyperliquidClient.isValidAddress).mockReturnValue(true);
+      vi.mocked(tradersRepo.findByAddress).mockResolvedValue(null);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/traders/0x1234567890123456789012345678901234567890/stats',
+      });
+
+      expect(response.statusCode).toBe(404);
+    });
+
+    it('should return stats for valid trader', async () => {
+      vi.mocked(hyperliquidClient.isValidAddress).mockReturnValue(true);
+      vi.mocked(tradersRepo.findByAddress).mockResolvedValue({
+        id: 1,
+        address: '0x1234567890123456789012345678901234567890',
+        first_seen_at: new Date(),
+        last_updated_at: new Date(),
+        is_active: true,
+      });
+      vi.mocked(getTraderState).mockReturnValue({
+        traderId: 1,
+        address: '0x1234567890123456789012345678901234567890',
+        realizedTradingPnl: toDecimal('500'),
+        realizedFundingPnl: toDecimal('50'),
+        totalFees: toDecimal('10'),
+        positions: new Map(),
+        totalVolume: toDecimal('100000'),
+        tradeCount: 25,
+        lastUpdated: new Date(),
+      });
+      vi.mocked(snapshotsRepo.getLatest).mockResolvedValue(null);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/traders/0x1234567890123456789012345678901234567890/stats',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.address).toBe('0x1234567890123456789012345678901234567890');
+      expect(body.total_trades).toBe(25);
+      expect(body.total_volume).toBe('100000');
+    });
+  });
+
+  describe('POST /traders/:address/subscribe', () => {
+    it('should return 400 for invalid address', async () => {
+      vi.mocked(hyperliquidClient.isValidAddress).mockReturnValue(false);
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/traders/invalid/subscribe',
+      });
+
+      expect(response.statusCode).toBe(400);
+    });
+
+    it('should subscribe new trader', async () => {
+      vi.mocked(hyperliquidClient.isValidAddress).mockReturnValue(true);
+      vi.mocked(tradersRepo.findOrCreate).mockResolvedValue({
+        id: 1,
+        address: '0x1234567890123456789012345678901234567890',
+        first_seen_at: new Date(),
+        last_updated_at: new Date(),
+        is_active: true,
+      });
+      vi.mocked(getTraderState).mockReturnValue(undefined);
+      vi.mocked(initializeTraderState).mockReturnValue({
+        traderId: 1,
+        address: '0x1234567890123456789012345678901234567890',
+        realizedTradingPnl: toDecimal('0'),
+        realizedFundingPnl: toDecimal('0'),
+        totalFees: toDecimal('0'),
+        positions: new Map(),
+        totalVolume: toDecimal('0'),
+        tradeCount: 0,
+        lastUpdated: new Date(),
+      });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/traders/0x1234567890123456789012345678901234567890/subscribe',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.status).toBe('tracking');
+      expect(body.message).toContain('Subscribed');
+    });
+
+    it('should return already tracking for existing trader', async () => {
+      vi.mocked(hyperliquidClient.isValidAddress).mockReturnValue(true);
+      vi.mocked(tradersRepo.findOrCreate).mockResolvedValue({
+        id: 1,
+        address: '0x1234567890123456789012345678901234567890',
+        first_seen_at: new Date(),
+        last_updated_at: new Date(),
+        is_active: true,
+      });
+      vi.mocked(getTraderState).mockReturnValue({
+        traderId: 1,
+        address: '0x1234567890123456789012345678901234567890',
+        realizedTradingPnl: toDecimal('0'),
+        realizedFundingPnl: toDecimal('0'),
+        totalFees: toDecimal('0'),
+        positions: new Map(),
+        totalVolume: toDecimal('0'),
+        tradeCount: 0,
+        lastUpdated: new Date(),
+      });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/traders/0x1234567890123456789012345678901234567890/subscribe',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.message).toContain('Already tracking');
+    });
+  });
+});
