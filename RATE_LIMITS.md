@@ -2,6 +2,11 @@
 
 This document explains Hyperliquid's rate limiting system and how it affects our PnL Indexer design.
 
+> **Status: HYBRID MODE INTEGRATED** ✅
+> 
+> As of v1.1.0, the hybrid approach (WebSocket + polling) is the default mode.
+> Set `USE_HYBRID_MODE=true` (default) to use it, or `USE_HYBRID_MODE=false` for legacy polling.
+
 ## TL;DR
 
 - **No authentication required** - Hyperliquid's info API is completely free and open

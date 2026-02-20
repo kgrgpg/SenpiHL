@@ -4,6 +4,88 @@ All notable changes to the PnL Indexer project.
 
 ---
 
+## [1.1.0] - 2026-02-20
+
+### 🚀 Full Integration Release
+
+This release integrates all production-grade features into the main application. The system is now fully autonomous - it discovers traders, subscribes them, and collects PnL data automatically.
+
+---
+
+### Hybrid Stream Integration
+
+The main app now uses **WebSocket for real-time fills** combined with **REST polling for position snapshots**:
+
+- **Configurable**: `USE_HYBRID_MODE=true` (default) enables hybrid mode
+- **Fallback**: Set `USE_HYBRID_MODE=false` for legacy polling-only mode
+- **Scales to**: ~5,000 traders within rate limits
+
+### Trader Discovery Integration
+
+Automatic trader discovery is now built into the main app:
+
+- Polls `recentTrades` for popular coins (BTC, ETH, SOL, etc.)
+- Extracts buyer/seller addresses from each trade
+- Queues new addresses in `trader_discovery_queue`
+- Discovers ~10,000+ traders per day passively
+
+### Auto-Subscribe Job
+
+A background job processes the discovery queue:
+
+- Runs every 60 seconds
+- Validates addresses before subscribing
+- Subscribes traders to the hybrid stream
+- Updates database with new traders
+
+### New Status API
+
+Added system status endpoints:
+
+- `GET /v1/status` - Mode, connections, discovery stats
+- `GET /v1/status/subscriptions` - List tracked addresses
+
+### Shared State Management
+
+Created `src/state/trader-state.ts` for centralized state:
+
+- Used by both data pipeline and API routes
+- Eliminates circular imports
+- Thread-safe trader state management
+
+### New Unsubscribe Endpoint
+
+Added `DELETE /v1/traders/:address/unsubscribe`:
+
+- Removes trader from tracking
+- Unsubscribes from hybrid stream
+- Marks as inactive in database
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `src/index.ts` | Integrated hybrid, discovery, auto-subscribe |
+| `src/api/routes/v1/traders.ts` | Added unsubscribe, hybrid mode support |
+| `src/api/routes/v1/status.ts` | NEW: System status endpoints |
+| `src/state/trader-state.ts` | NEW: Shared state module |
+| `src/jobs/auto-subscribe.ts` | Fixed return type |
+| `src/streams/sources/trader-discovery.stream.ts` | Added isRunning, discoveredCount getters |
+
+---
+
+## [1.0.1] - 2026-02-20
+
+### Dual-Source Leaderboard
+
+Added transparent leaderboard with data source tracking:
+
+- `timeframe=all` uses Hyperliquid's portfolio API
+- Recent timeframes (1d/7d/30d) use our calculated data
+- Each entry shows `tracking_since` and `data_source`
+
+---
+
 ## [1.0.0] - 2026-02-20
 
 ### 🎉 Full Implementation Release

@@ -2,6 +2,11 @@
 
 This document explains how we handle trader discovery and ensure data completeness over time.
 
+> **Status: FULLY INTEGRATED** ✅
+> 
+> As of v1.1.0, trader discovery and auto-subscribe are fully integrated into the main application.
+> The system automatically discovers and subscribes to new traders when you run `npm run dev`.
+
 ## The Fundamental Challenge
 
 **Hyperliquid does NOT provide:**

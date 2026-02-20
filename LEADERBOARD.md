@@ -2,6 +2,13 @@
 
 This document explains how the PnL leaderboard works, its limitations, and how we ensure accuracy.
 
+> **Status: FULLY INTEGRATED** ✅
+> 
+> The dual-source leaderboard is fully integrated into the main app.
+> - `GET /v1/leaderboard?timeframe=1d|7d|30d` - Uses our calculated data
+> - `GET /v1/leaderboard?timeframe=all` - Uses Hyperliquid's portfolio API
+> - `GET /v1/leaderboard/info` - API documentation
+
 ---
 
 ## The Challenge
