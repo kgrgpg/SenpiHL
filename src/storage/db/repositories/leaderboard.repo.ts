@@ -45,15 +45,16 @@ export async function getLeaderboard(
 
   const orderColumn = metric === 'volume' ? 'delta_volume' : `delta_${metric}`;
 
-  // Calculate DELTA between earliest and latest snapshots in the timeframe
+  // Delta PnL: latest - earliest in timeframe
+  // Volume: MAX in timeframe (immune to restart-resets)
+  // Trade count: from trades table
   const result = await query<LeaderboardRow>(
     `WITH earliest_snapshots AS (
       SELECT DISTINCT ON (trader_id)
         trader_id,
         total_pnl as start_total_pnl,
         realized_pnl as start_realized_pnl,
-        unrealized_pnl as start_unrealized_pnl,
-        total_volume as start_volume
+        unrealized_pnl as start_unrealized_pnl
       FROM pnl_snapshots
       WHERE timestamp >= $1
       ORDER BY trader_id, timestamp ASC
@@ -63,25 +64,33 @@ export async function getLeaderboard(
         trader_id,
         total_pnl as end_total_pnl,
         realized_pnl as end_realized_pnl,
-        unrealized_pnl as end_unrealized_pnl,
-        total_volume as end_volume
+        unrealized_pnl as end_unrealized_pnl
       FROM pnl_snapshots
       WHERE timestamp >= $1
       ORDER BY trader_id, timestamp DESC
     ),
+    max_volume AS (
+      SELECT trader_id, MAX(total_volume) as peak_volume
+      FROM pnl_snapshots
+      WHERE timestamp >= $1
+      GROUP BY trader_id
+    ),
+    trade_counts AS (
+      SELECT trader_id, COUNT(*)::int as trade_count
+      FROM trades
+      WHERE timestamp >= $1
+      GROUP BY trader_id
+    ),
     delta_pnl AS (
       SELECT 
         ls.trader_id,
-        ls.end_total_pnl,
-        ls.end_realized_pnl,
-        ls.end_unrealized_pnl,
-        ls.end_volume,
         (ls.end_total_pnl::numeric - COALESCE(es.start_total_pnl::numeric, 0)) as delta_total_pnl,
         (ls.end_realized_pnl::numeric - COALESCE(es.start_realized_pnl::numeric, 0)) as delta_realized_pnl,
         (ls.end_unrealized_pnl::numeric - COALESCE(es.start_unrealized_pnl::numeric, 0)) as delta_unrealized_pnl,
-        (ls.end_volume::numeric - COALESCE(es.start_volume::numeric, 0)) as delta_volume
+        COALESCE(mv.peak_volume, 0) as delta_volume
       FROM latest_snapshots ls
       LEFT JOIN earliest_snapshots es ON es.trader_id = ls.trader_id
+      LEFT JOIN max_volume mv ON mv.trader_id = ls.trader_id
     )
     SELECT 
       ROW_NUMBER() OVER (ORDER BY dp.${orderColumn} DESC) as rank,
@@ -91,11 +100,12 @@ export async function getLeaderboard(
       dp.delta_realized_pnl::text as realized_pnl,
       dp.delta_unrealized_pnl::text as unrealized_pnl,
       dp.delta_volume::text as volume,
-      0::int as trade_count,
+      COALESCE(tc.trade_count, 0)::int as trade_count,
       t.first_seen_at as tracking_since,
       'calculated' as data_source
     FROM delta_pnl dp
     JOIN traders t ON t.id = dp.trader_id
+    LEFT JOIN trade_counts tc ON tc.trader_id = dp.trader_id
     ORDER BY dp.${orderColumn} DESC
     LIMIT $2`,
     [since, limit]
