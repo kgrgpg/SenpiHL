@@ -19,7 +19,7 @@ import {
   createSnapshot,
 } from '../pnl/calculator.js';
 import type { PnLStateData } from '../pnl/types.js';
-import { snapshotsRepo, tradersRepo } from '../storage/db/repositories/index.js';
+import { snapshotsRepo, tradersRepo, tradesRepo, fundingRepo } from '../storage/db/repositories/index.js';
 import { config } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
 
@@ -68,10 +68,13 @@ function processChunk$(
     fills: fetchUserFills(address, chunk.start, chunk.end),
     funding: fetchUserFunding(address, chunk.start, chunk.end),
   }).pipe(
-    map(({ fills, funding }) => {
+    mergeMap(({ fills, funding }) => {
       let state = initialState;
       let fillCount = 0;
       let fundingCount = 0;
+
+      const tradesToPersist = [];
+      const fundingToPersist = [];
 
       // Apply fills
       for (const fill of fills.sort((a, b) => a.time - b.time)) {
@@ -89,6 +92,19 @@ function processChunk$(
           fill.startPosition
         );
         state = applyTrade(state, trade);
+        tradesToPersist.push({
+          traderId: state.traderId,
+          coin: trade.coin,
+          side: trade.side,
+          size: trade.size,
+          price: trade.price,
+          closedPnl: trade.closedPnl,
+          fee: trade.fee,
+          timestamp: trade.timestamp,
+          txHash: fill.hash,
+          oid: fill.oid,
+          tid: trade.tid,
+        });
         fillCount++;
       }
 
@@ -102,14 +118,29 @@ function processChunk$(
           fund.time
         );
         state = applyFunding(state, fundingData);
+        fundingToPersist.push({
+          traderId: state.traderId,
+          coin: fundingData.coin,
+          fundingRate: fundingData.fundingRate,
+          payment: fundingData.payment,
+          positionSize: fundingData.positionSize,
+          timestamp: fundingData.timestamp,
+        });
         fundingCount++;
       }
 
-      return {
-        fills: fillCount,
-        funding: fundingCount,
-        state,
-      };
+      // Persist trades and funding to DB
+      const persistTrades = tradesToPersist.length > 0
+        ? from(tradesRepo.insertMany(tradesToPersist))
+        : of(undefined);
+      const persistFunding = fundingToPersist.length > 0
+        ? from(fundingRepo.insertMany(fundingToPersist))
+        : of(undefined);
+
+      return forkJoin({ t: persistTrades, f: persistFunding }).pipe(
+        map(() => ({ fills: fillCount, funding: fundingCount, state })),
+        catchError(() => of({ fills: fillCount, funding: fundingCount, state }))
+      );
     }),
     catchError((err) => {
       logger.error({ error: (err as Error).message, address }, 'Failed to process chunk');

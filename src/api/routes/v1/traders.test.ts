@@ -304,4 +304,161 @@ describe('Traders Routes', () => {
       expect(body.message).toContain('Already tracking');
     });
   });
+
+  describe('GET /traders/:address/pnl - Response Schema Validation (REQUIREMENTS.md)', () => {
+    const VALID_ADDRESS = '0x1234567890123456789012345678901234567890';
+
+    beforeEach(() => {
+      vi.mocked(hyperliquidClient.isValidAddress).mockReturnValue(true);
+      vi.mocked(tradersRepo.findByAddress).mockResolvedValue({
+        id: 1,
+        address: VALID_ADDRESS,
+        first_seen_at: new Date(),
+        last_updated_at: new Date(),
+        is_active: true,
+      });
+    });
+
+    it('should match exact response format from requirements spec', async () => {
+      vi.mocked(snapshotsRepo.getForTrader).mockResolvedValue([
+        {
+          trader_id: 1,
+          timestamp: new Date('2024-01-01T12:00:00Z'),
+          realized_pnl: '1234.56',
+          unrealized_pnl: '567.89',
+          total_pnl: '1802.45',
+          funding_pnl: '100',
+          trading_pnl: '1134.56',
+          open_positions: 3,
+          total_volume: '50000.00',
+          account_value: '10000',
+        },
+      ]);
+      vi.mocked(snapshotsRepo.getSummary).mockResolvedValue({
+        peakPnl: '2000',
+        troughPnl: '-500',
+        totalRealized: '1234.56',
+      });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/traders/${VALID_ADDRESS}/pnl?timeframe=1d`,
+      });
+
+      const body = JSON.parse(response.body);
+
+      // Required top-level fields
+      expect(body).toHaveProperty('trader');
+      expect(body).toHaveProperty('timeframe');
+      expect(body).toHaveProperty('data');
+      expect(body).toHaveProperty('summary');
+      expect(typeof body.trader).toBe('string');
+      expect(typeof body.timeframe).toBe('string');
+      expect(Array.isArray(body.data)).toBe(true);
+
+      // Required data[] fields (per requirements spec)
+      const dataPoint = body.data[0];
+      expect(dataPoint).toHaveProperty('timestamp');
+      expect(dataPoint).toHaveProperty('realized_pnl');
+      expect(dataPoint).toHaveProperty('unrealized_pnl');
+      expect(dataPoint).toHaveProperty('total_pnl');
+      expect(dataPoint).toHaveProperty('positions');
+      expect(dataPoint).toHaveProperty('volume');
+      expect(typeof dataPoint.timestamp).toBe('number');
+      expect(typeof dataPoint.realized_pnl).toBe('string');
+      expect(typeof dataPoint.positions).toBe('number');
+
+      // Required summary fields (per requirements spec)
+      expect(body.summary).toHaveProperty('total_realized');
+      expect(body.summary).toHaveProperty('peak_pnl');
+      expect(body.summary).toHaveProperty('max_drawdown');
+    });
+
+    it('should calculate max_drawdown correctly (trough - peak)', async () => {
+      vi.mocked(snapshotsRepo.getForTrader).mockResolvedValue([]);
+      vi.mocked(snapshotsRepo.getSummary).mockResolvedValue({
+        peakPnl: '5000',
+        troughPnl: '-2000',
+        totalRealized: '3000',
+      });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/traders/${VALID_ADDRESS}/pnl?timeframe=1d`,
+      });
+
+      const body = JSON.parse(response.body);
+
+      // max_drawdown = trough - peak = -2000 - 5000 = -7000
+      expect(body.summary.max_drawdown).toBe('-7000');
+      expect(body.summary.peak_pnl).toBe('5000');
+      expect(body.summary.total_realized).toBe('3000');
+    });
+
+    it('should handle max_drawdown when all PnL is positive', async () => {
+      vi.mocked(snapshotsRepo.getForTrader).mockResolvedValue([]);
+      vi.mocked(snapshotsRepo.getSummary).mockResolvedValue({
+        peakPnl: '10000',
+        troughPnl: '2000',
+        totalRealized: '8000',
+      });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/traders/${VALID_ADDRESS}/pnl`,
+      });
+
+      const body = JSON.parse(response.body);
+
+      // max_drawdown = trough - peak = 2000 - 10000 = -8000
+      expect(body.summary.max_drawdown).toBe('-8000');
+    });
+
+    it('should return zero summary when no snapshot data exists', async () => {
+      vi.mocked(snapshotsRepo.getForTrader).mockResolvedValue([]);
+      vi.mocked(snapshotsRepo.getSummary).mockResolvedValue(null);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/traders/${VALID_ADDRESS}/pnl`,
+      });
+
+      const body = JSON.parse(response.body);
+
+      expect(body.summary.total_realized).toBe('0');
+      expect(body.summary.peak_pnl).toBe('0');
+      expect(body.summary.max_drawdown).toBe('0');
+      expect(body.data).toHaveLength(0);
+    });
+
+    it('should include current_pnl from latest snapshot', async () => {
+      vi.mocked(snapshotsRepo.getForTrader).mockResolvedValue([
+        {
+          trader_id: 1,
+          timestamp: new Date(),
+          realized_pnl: '500',
+          unrealized_pnl: '200',
+          total_pnl: '700',
+          funding_pnl: '50',
+          trading_pnl: '450',
+          open_positions: 1,
+          total_volume: '20000',
+          account_value: '5000',
+        },
+      ]);
+      vi.mocked(snapshotsRepo.getSummary).mockResolvedValue({
+        peakPnl: '700',
+        troughPnl: '100',
+        totalRealized: '500',
+      });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/traders/${VALID_ADDRESS}/pnl`,
+      });
+
+      const body = JSON.parse(response.body);
+      expect(body.summary.current_pnl).toBe('700');
+    });
+  });
 });

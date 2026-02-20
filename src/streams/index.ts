@@ -29,6 +29,7 @@ import {
 import type { PnLStateData, SnapshotData } from '../pnl/types.js';
 import { toDecimal } from '../utils/decimal.js';
 import { logger } from '../utils/logger.js';
+import { tradesRepo, fundingRepo } from '../storage/db/repositories/index.js';
 
 import { withMetrics } from './operators/with-metrics.js';
 import {
@@ -93,6 +94,8 @@ function processFillsUpdate(update: FillsUpdate): SnapshotData | null {
     return null;
   }
 
+  const tradesToPersist = [];
+
   for (const fill of update.fills) {
     const trade = parseTradeFromApi(
       fill.coin,
@@ -108,6 +111,23 @@ function processFillsUpdate(update: FillsUpdate): SnapshotData | null {
       fill.startPosition
     );
     state = applyTrade(state, trade);
+    tradesToPersist.push({
+      traderId: state.traderId,
+      coin: trade.coin,
+      side: trade.side,
+      size: trade.size,
+      price: trade.price,
+      closedPnl: trade.closedPnl,
+      fee: trade.fee,
+      timestamp: trade.timestamp,
+      tid: trade.tid,
+    });
+  }
+
+  if (tradesToPersist.length > 0) {
+    tradesRepo.insertMany(tradesToPersist).catch(err =>
+      logger.warn({ err: (err as Error).message }, 'Failed to persist trades')
+    );
   }
 
   traderStates.set(update.address, state);

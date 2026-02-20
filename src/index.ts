@@ -46,7 +46,7 @@ import {
 import type { SnapshotData } from './pnl/types.js';
 import { toDecimal } from './utils/decimal.js';
 import { db } from './storage/db/client.js';
-import { snapshotsRepo, tradersRepo } from './storage/db/repositories/index.js';
+import { snapshotsRepo, tradersRepo, tradesRepo, fundingRepo } from './storage/db/repositories/index.js';
 import { cache } from './storage/cache/redis.js';
 import { config } from './utils/config.js';
 import { logger } from './utils/logger.js';
@@ -105,6 +105,21 @@ function processHybridFill(address: string, fill: WebSocketFill): SnapshotData |
 
   state = applyTrade(state, trade);
   setTraderState(address, state);
+
+  // Persist trade to DB (non-blocking)
+  tradesRepo.insert({
+    traderId: state.traderId,
+    coin: trade.coin,
+    side: trade.side,
+    size: trade.size,
+    price: trade.price,
+    closedPnl: trade.closedPnl,
+    fee: trade.fee,
+    timestamp: trade.timestamp,
+    txHash: fill.hash,
+    oid: fill.oid,
+    tid: trade.tid,
+  }).catch(err => logger.warn({ err: (err as Error).message, tid: trade.tid }, 'Failed to persist trade'));
 
   return createSnapshot(state);
 }

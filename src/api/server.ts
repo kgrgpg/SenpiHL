@@ -1,5 +1,7 @@
 import fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
+import swagger from '@fastify/swagger';
+import swaggerUi from '@fastify/swagger-ui';
 
 import { config } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
@@ -15,6 +17,27 @@ export async function createServer(): Promise<FastifyInstance> {
   await app.register(cors, {
     origin: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  });
+
+  await app.register(swagger, {
+    openapi: {
+      info: {
+        title: 'PnL Indexer API',
+        description: 'PnL indexing service for Hyperliquid perpetual traders. Tracks realized/unrealized PnL, funding payments, and trading volume.',
+        version: '1.2.0',
+      },
+      tags: [
+        { name: 'health', description: 'Health and readiness probes' },
+        { name: 'traders', description: 'Trader PnL, positions, and management' },
+        { name: 'leaderboard', description: 'Trader rankings by PnL' },
+        { name: 'backfill', description: 'Historical data backfill' },
+        { name: 'status', description: 'System status and monitoring' },
+      ],
+    },
+  });
+
+  await app.register(swaggerUi, {
+    routePrefix: '/docs',
   });
 
   app.addHook('onRequest', async request => {
