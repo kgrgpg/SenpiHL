@@ -46,17 +46,22 @@ export async function getLeaderboard(
   const orderColumn = metric === 'volume' ? 'delta_volume' : `delta_${metric}`;
 
   // Delta PnL: latest - earliest in timeframe
+  // Excludes zero-PnL snapshots (backfill initialization artifacts)
   // Volume: MAX in timeframe (immune to restart-resets)
   // Trade count: from trades table
   const result = await query<LeaderboardRow>(
-    `WITH earliest_snapshots AS (
+    `WITH valid_snapshots AS (
+      SELECT * FROM pnl_snapshots
+      WHERE timestamp >= $1
+        AND NOT (total_pnl = 0 AND realized_pnl = 0 AND unrealized_pnl = 0)
+    ),
+    earliest_snapshots AS (
       SELECT DISTINCT ON (trader_id)
         trader_id,
         total_pnl as start_total_pnl,
         realized_pnl as start_realized_pnl,
         unrealized_pnl as start_unrealized_pnl
-      FROM pnl_snapshots
-      WHERE timestamp >= $1
+      FROM valid_snapshots
       ORDER BY trader_id, timestamp ASC
     ),
     latest_snapshots AS (
@@ -65,14 +70,12 @@ export async function getLeaderboard(
         total_pnl as end_total_pnl,
         realized_pnl as end_realized_pnl,
         unrealized_pnl as end_unrealized_pnl
-      FROM pnl_snapshots
-      WHERE timestamp >= $1
+      FROM valid_snapshots
       ORDER BY trader_id, timestamp DESC
     ),
     max_volume AS (
       SELECT trader_id, MAX(total_volume) as peak_volume
-      FROM pnl_snapshots
-      WHERE timestamp >= $1
+      FROM valid_snapshots
       GROUP BY trader_id
     ),
     trade_counts AS (
