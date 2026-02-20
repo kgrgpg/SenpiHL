@@ -5,7 +5,7 @@ import { config } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
 
 import { healthRoutes } from './routes/health.js';
-import { tradersRoutes, leaderboardRoutes, backfillRoutes } from './routes/v1/index.js';
+import { tradersRoutes, leaderboardRoutes, backfillRoutes, statusRoutes } from './routes/v1/index.js';
 
 export async function createServer(): Promise<FastifyInstance> {
   const app = fastify({
@@ -49,6 +49,7 @@ export async function createServer(): Promise<FastifyInstance> {
       await instance.register(tradersRoutes);
       await instance.register(leaderboardRoutes);
       await instance.register(backfillRoutes);
+      await instance.register(statusRoutes);
     },
     { prefix: '/v1' }
   );

@@ -58,9 +58,24 @@ export class TraderDiscoveryStream {
   private readonly destroy$ = new Subject<void>();
   private readonly seenAddresses = new Set<string>();
   private readonly knownAddresses = new Set<string>();
-  private isRunning = false;
+  private _isRunning = false;
+  private _discoveredCount = 0;
 
   constructor() {}
+
+  /**
+   * Check if discovery is running
+   */
+  get isRunning(): boolean {
+    return this._isRunning;
+  }
+
+  /**
+   * Get count of discovered traders this session
+   */
+  get discoveredCount(): number {
+    return this._discoveredCount;
+  }
 
   /**
    * Stream of newly discovered traders
@@ -73,8 +88,8 @@ export class TraderDiscoveryStream {
    * Start polling for trader discovery
    */
   async start(): Promise<void> {
-    if (this.isRunning) return;
-    this.isRunning = true;
+    if (this._isRunning) return;
+    this._isRunning = true;
 
     await this.loadKnownAddresses();
     this.startPolling();
@@ -89,7 +104,7 @@ export class TraderDiscoveryStream {
    */
   stop(): void {
     this.destroy$.next();
-    this.isRunning = false;
+    this._isRunning = false;
     logger.info('Trader discovery stopped');
   }
 
@@ -195,6 +210,7 @@ export class TraderDiscoveryStream {
     // Mark as seen
     this.seenAddresses.add(normalized);
     this.knownAddresses.add(normalized); // Prevent re-queuing
+    this._discoveredCount++;
 
     // Emit discovery
     this.discovered$.next({

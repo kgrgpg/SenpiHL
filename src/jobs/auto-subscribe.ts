@@ -172,7 +172,7 @@ function sleep(ms: number): Promise<void> {
 /**
  * Start periodic processing of the discovery queue
  */
-export function startAutoSubscribeJob(intervalMs: number = 60000): NodeJS.Timer {
+export function startAutoSubscribeJob(intervalMs: number = 60000): ReturnType<typeof setInterval> {
   logger.info({ intervalMs }, 'Starting auto-subscribe job');
 
   // Run immediately

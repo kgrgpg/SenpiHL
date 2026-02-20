@@ -1,9 +1,15 @@
-import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 
 import { hyperliquidClient } from '../../../hyperliquid/client.js';
-import { initializeTraderState, getTraderState } from '../../../streams/index.js';
 import { tradersRepo, snapshotsRepo } from '../../../storage/db/repositories/index.js';
+import { getHybridDataStream } from '../../../streams/sources/hybrid.stream.js';
+import {
+  getTraderState,
+  initializeTraderState,
+  removeTraderState,
+} from '../../../state/trader-state.js';
 import { toDecimal } from '../../../utils/decimal.js';
+import { config } from '../../../utils/config.js';
 import { logger } from '../../../utils/logger.js';
 
 interface PnLQueryParams {
@@ -18,6 +24,10 @@ interface AddressParams {
 }
 
 export async function tradersRoutes(fastify: FastifyInstance): Promise<void> {
+  /**
+   * GET /v1/traders/:address/pnl
+   * Get PnL data for a trader
+   */
   fastify.get<{
     Params: AddressParams;
     Querystring: PnLQueryParams;
@@ -80,6 +90,10 @@ export async function tradersRoutes(fastify: FastifyInstance): Promise<void> {
     };
   });
 
+  /**
+   * GET /v1/traders/:address/stats
+   * Get statistics for a trader
+   */
   fastify.get<{ Params: AddressParams }>('/traders/:address/stats', async (request, reply) => {
     const { address } = request.params;
 
@@ -113,31 +127,128 @@ export async function tradersRoutes(fastify: FastifyInstance): Promise<void> {
     };
   });
 
+  /**
+   * POST /v1/traders/:address/subscribe
+   * Subscribe to a trader for tracking
+   */
   fastify.post<{ Params: AddressParams; Body: { backfill_days?: number } }>(
     '/traders/:address/subscribe',
     async (request, reply) => {
       const { address } = request.params;
-      const { backfill_days = 30 } = request.body ?? {};
+      // backfill_days can be used for triggering backfill job in future
+      const _backfillDays = request.body?.backfill_days ?? 30;
 
       if (!hyperliquidClient.isValidAddress(address)) {
         return reply.status(400).send({ error: 'Invalid Ethereum address' });
       }
 
       const trader = await tradersRepo.findOrCreate(address);
-      const existingState = getTraderState(address);
+      
+      // Initialize state
+      initializeTraderState(trader.id, address);
 
-      if (!existingState) {
-        initializeTraderState(trader.id, address);
+      if (config.USE_HYBRID_MODE) {
+        // Subscribe via HybridDataStream
+        const hybridStream = getHybridDataStream();
+        hybridStream.subscribeTrader(address);
+        logger.info({ address, traderId: trader.id, mode: 'hybrid' }, 'Trader subscribed');
+      } else {
+        logger.info({ address, traderId: trader.id, mode: 'legacy' }, 'Trader subscribed');
       }
-
-      logger.info({ address, traderId: trader.id }, 'Trader subscribed');
 
       return {
         address,
         trader_id: trader.id,
         status: 'tracking',
-        message: existingState ? 'Already tracking' : 'Subscribed successfully',
+        mode: config.USE_HYBRID_MODE ? 'hybrid' : 'legacy',
+        message: 'Subscribed successfully',
       };
     }
   );
+
+  /**
+   * DELETE /v1/traders/:address/unsubscribe
+   * Unsubscribe from tracking a trader
+   */
+  fastify.delete<{ Params: AddressParams }>(
+    '/traders/:address/unsubscribe',
+    async (request, reply) => {
+      const { address } = request.params;
+
+      if (!hyperliquidClient.isValidAddress(address)) {
+        return reply.status(400).send({ error: 'Invalid Ethereum address' });
+      }
+
+      const trader = await tradersRepo.findByAddress(address);
+      if (!trader) {
+        return reply.status(404).send({ error: 'Trader not found' });
+      }
+
+      // Mark as inactive in database
+      await tradersRepo.setActive(trader.id, false);
+
+      // Remove from state
+      removeTraderState(address);
+
+      if (config.USE_HYBRID_MODE) {
+        // Unsubscribe from hybrid stream
+        const hybridStream = getHybridDataStream();
+        hybridStream.unsubscribeTrader(address);
+        logger.info({ address, traderId: trader.id, mode: 'hybrid' }, 'Trader unsubscribed');
+      } else {
+        logger.info({ address, traderId: trader.id, mode: 'legacy' }, 'Trader unsubscribed');
+      }
+
+      return {
+        address,
+        trader_id: trader.id,
+        status: 'unsubscribed',
+        message: 'Trader removed from tracking',
+      };
+    }
+  );
+
+  /**
+   * GET /v1/traders/:address/positions
+   * Get current positions for a trader
+   */
+  fastify.get<{ Params: AddressParams }>('/traders/:address/positions', async (request, reply) => {
+    const { address } = request.params;
+
+    if (!hyperliquidClient.isValidAddress(address)) {
+      return reply.status(400).send({ error: 'Invalid Ethereum address' });
+    }
+
+    const trader = await tradersRepo.findByAddress(address);
+    if (!trader) {
+      return reply.status(404).send({ error: 'Trader not found' });
+    }
+
+    const state = getTraderState(address);
+
+    if (!state) {
+      return reply.status(404).send({ error: 'No position data available yet' });
+    }
+
+    const positions = Array.from(state.positions.values()).map(p => ({
+      coin: p.coin,
+      size: p.size.toString(),
+      entry_price: p.entryPrice.toString(),
+      unrealized_pnl: p.unrealizedPnl.toString(),
+      leverage: p.leverage,
+      liquidation_price: p.liquidationPrice?.toString() ?? null,
+      margin_used: p.marginUsed.toString(),
+    }));
+
+    return {
+      address,
+      positions,
+      total_positions: positions.length,
+      total_unrealized_pnl: state.positions.size > 0
+        ? Array.from(state.positions.values())
+            .reduce((sum, p) => sum.plus(p.unrealizedPnl), toDecimal('0'))
+            .toString()
+        : '0',
+    };
+  });
 }

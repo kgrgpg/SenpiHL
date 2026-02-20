@@ -44,7 +44,7 @@ export async function updateTraderLastSeen(id: number): Promise<void> {
 }
 
 export async function setTraderActive(id: number, isActive: boolean): Promise<void> {
-  await query('UPDATE traders SET is_active = $1, last_updated_at = NOW() WHERE id = $1', [
+  await query('UPDATE traders SET is_active = $1, last_updated_at = NOW() WHERE id = $2', [
     isActive,
     id,
   ]);
