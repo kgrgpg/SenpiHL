@@ -4,6 +4,66 @@ All notable changes to the PnL Indexer project.
 
 ---
 
+## [1.1.2] - 2026-02-20
+
+### 🔧 Delta PnL Fix & Data Storage Design Documentation
+
+#### Fixed: Leaderboard Delta Calculation
+
+The time-bounded leaderboard (`1d`, `7d`, `30d`) now correctly calculates **delta PnL** (change over the interval) instead of absolute values.
+
+**Before (incorrect):**
+```sql
+-- Just took the latest snapshot's total_pnl
+SELECT DISTINCT ON (trader_id) total_pnl 
+FROM pnl_snapshots WHERE timestamp >= $interval ORDER BY timestamp DESC
+```
+
+**After (correct):**
+```sql
+-- Calculates: latest_pnl - earliest_pnl = delta
+WITH earliest AS (...), latest AS (...)
+SELECT (latest.total_pnl - earliest.total_pnl) as delta_total_pnl
+```
+
+#### Added: Snapshot Granularity Trade-off Documentation
+
+Documented storage estimates and recommended settings for production:
+
+| Granularity | Snapshots/trader/day | 250 traders × 30 days |
+|-------------|---------------------|----------------------|
+| 30 seconds | 2,880 | 21.6M rows |
+| 1 minute | 1,440 | 10.8M rows (recommended) |
+| 5 minutes | 288 | 2.2M rows |
+
+#### Added: Data Storage Design Documentation (ARCHITECTURE.md)
+
+Comprehensive documentation of the Snapshots vs Trades design decision:
+
+**Storage vs Query Speed Trade-off:**
+
+| Approach | Storage | Query Speed |
+|----------|---------|-------------|
+| Trades Only | LEAST (~50 MB) | SLOW (must aggregate) |
+| Snapshots (5min) | Medium (~200 MB) | FAST (pre-computed) |
+| Snapshots (30s) | MOST (~2 GB) | FASTEST |
+
+**Design Decision Rationale:**
+- Snapshots-only covers 100% of original requirements
+- All required fields (realized_pnl, unrealized_pnl, volume, positions, etc.) stored in snapshots
+- Features NOT in requirements (per-asset PnL, win rate, trade history) would need trades table
+- Trade-off accepted: ±30s interval precision vs query speed
+
+#### Added: Leaderboard Delta Calculation Tests
+
+New test file `leaderboard.repo.test.ts` with 7 tests covering:
+- Delta SQL structure verification  
+- Time boundary calculations (1d, 7d, 30d)
+- Ordering by different metrics
+- Negative delta scenarios
+
+---
+
 ## [1.1.1] - 2026-02-20
 
 ### 🔄 RxJS Pattern Consistency Refactor

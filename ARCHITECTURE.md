@@ -394,6 +394,547 @@ SELECT add_compression_policy('pnl_snapshots', INTERVAL '7 days');
 SELECT add_retention_policy('pnl_snapshots', INTERVAL '90 days');
 ```
 
+### Snapshot Granularity Trade-offs
+
+**Current Configuration:**
+- **Hybrid mode**: 30-second buffer intervals (saves every 30s)
+- **Legacy mode**: 60-second buffer intervals
+- **Continuous aggregates**: Hourly and daily rollups (auto-refreshed)
+
+**Storage Estimates (250 traders, 30 days):**
+
+| Granularity | Snapshots/trader/day | 250 traders × 30 days | Notes |
+|-------------|---------------------|----------------------|-------|
+| 30 seconds | 2,880 | **21.6M rows** | Current hybrid mode |
+| 1 minute | 1,440 | 10.8M rows | Recommended production |
+| 5 minutes | 288 | 2.2M rows | Balance of precision/storage |
+| 1 hour (aggregate) | 24 | 180K rows | Via continuous aggregate |
+
+**Recommended Production Settings:**
+
+```typescript
+// In src/index.ts - increase buffer interval
+bufferTime(60000)  // 1 minute (was 30s)
+
+// Or even better for scale:
+bufferTime(300000) // 5 minutes
+```
+
+**Why This Matters for Delta PnL:**
+
+Delta PnL = `latest_snapshot.total_pnl - earliest_snapshot.total_pnl`
+
+- More frequent snapshots = more precise interval boundaries
+- Less frequent snapshots = less storage, but coarser deltas
+- **Continuous aggregates** provide best of both worlds for historical queries
+
+**Query Strategy:**
+
+| Timeframe | Query Target | Why |
+|-----------|-------------|-----|
+| < 24h | `pnl_snapshots` (raw) | Fine-grained precision |
+| 1-7 days | `pnl_hourly` (aggregate) | Faster, pre-computed |
+| > 7 days | `pnl_daily` (aggregate) | Fastest, minimal data |
+
+---
+
+## Data Storage Design: Snapshots vs Trades
+
+This section documents the critical design decision around what data we store and its implications for PnL calculations.
+
+### The Three Approaches
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                        DATA STORAGE APPROACHES                                │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                               │
+│  APPROACH 1              APPROACH 2                APPROACH 3                 │
+│  SNAPSHOTS ONLY          SNAPSHOTS + TRADES        TRADES ONLY                │
+│  (Current Implementation) (Recommended for Scale)  (Maximum Flexibility)      │
+│                                                                               │
+│  Store periodic          Store both periodic       Store every individual     │
+│  aggregate state         snapshots AND each        trade, derive snapshots    │
+│  (every 30s-5min)        individual trade          on-demand                  │
+│                                                                               │
+│  ┌─────────────────┐     ┌─────────────────┐       ┌─────────────────┐       │
+│  │ pnl_snapshots   │     │ pnl_snapshots   │       │ trades          │       │
+│  │ ─────────────── │     │ ─────────────── │       │ ─────────────── │       │
+│  │ timestamp       │     │ timestamp       │       │ timestamp       │       │
+│  │ total_pnl       │     │ total_pnl       │       │ coin            │       │
+│  │ realized_pnl    │     │ realized_pnl    │       │ side            │       │
+│  │ unrealized_pnl  │     │ + + + + + + + + │       │ size            │       │
+│  │ volume          │     │                 │       │ price           │       │
+│  └─────────────────┘     │ trades          │       │ closed_pnl      │       │
+│                          │ ─────────────── │       │ fee             │       │
+│                          │ timestamp       │       │ direction       │       │
+│                          │ coin, side      │       └─────────────────┘       │
+│                          │ size, price     │                                  │
+│                          │ closed_pnl, fee │                                  │
+│                          └─────────────────┘                                  │
+│                                                                               │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Capability Comparison
+
+| Capability | Snapshots Only | Snapshots + Trades | Trades Only |
+|------------|----------------|-------------------|-------------|
+| **Interval PnL** (7d, 30d) | ✅ Yes (±30s accuracy) | ✅ Yes (exact) | ✅ Yes (exact) |
+| **Exact time range** (3:00-5:00 PM) | ⚠️ ±snapshot_interval | ✅ Exact | ✅ Exact |
+| **Per-asset PnL** (BTC vs ETH) | ❌ No | ✅ Yes | ✅ Yes |
+| **Win rate** | ❌ No | ✅ Yes | ✅ Yes |
+| **Average trade size** | ❌ No | ✅ Yes | ✅ Yes |
+| **Largest winning trade** | ❌ No | ✅ Yes | ✅ Yes |
+| **Trade frequency** | ❌ No | ✅ Yes | ✅ Yes |
+| **Quick leaderboard query** | ✅ Fast | ✅ Fast (from snapshots) | ⚠️ Slow (aggregation) |
+| **Storage efficiency** | ✅ Best | ⚠️ Medium | ❌ Highest |
+| **Query complexity** | ✅ Simple | ⚠️ Medium | ❌ Complex |
+
+### Storage vs Query Speed Trade-off
+
+**Assumptions:** 250 traders, 30 days, avg 50 trades/trader/day
+
+| Approach | Row Count | Storage | Query Speed | Why |
+|----------|-----------|---------|-------------|-----|
+| **Trades Only** | 375K | ~50 MB | ❌ Slowest | Must aggregate on every query |
+| **Snapshots (5min)** | 2.2M | ~200 MB | ✅ Fast | Pre-aggregated, just read |
+| **Snapshots (30s)** | 21.6M | ~2 GB | ✅ Fastest | Finest precision, pre-aggregated |
+| **Snapshots + Trades** | 2.2M + 375K | ~250 MB | ✅ Fast + Flexible | Best of both |
+
+**The Core Trade-off:**
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                                                                      │
+│  TRADES ONLY          SNAPSHOTS (sparse)      SNAPSHOTS (frequent)  │
+│                                                                      │
+│  Storage: LEAST ◄─────────────────────────────────────► MOST        │
+│  Query:   SLOW  ◄─────────────────────────────────────► FAST        │
+│           (aggregate)                              (pre-computed)    │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Query Performance: Quantified
+
+**Assumptions:**
+- 250 traders, 50 trades/trader/day, 7-day query window
+- PostgreSQL with proper indexes
+- Warm cache (data in memory)
+
+#### Single Trader PnL Query
+
+| Approach | Query | Rows Scanned | Estimated Time |
+|----------|-------|--------------|----------------|
+| **Snapshots** | `SELECT total_pnl FROM snapshots WHERE trader_id=X AND timestamp IN (start, end)` | 2 rows (index lookup) | **1-5 ms** |
+| **Trades** | `SELECT SUM(closed_pnl) FROM trades WHERE trader_id=X AND timestamp > now()-7d` | 350 rows (50/day × 7) | **10-30 ms** |
+
+**Ratio: Trades is ~5-10x slower for single trader**
+
+#### Leaderboard Query (Critical Path)
+
+This is where the difference matters most - ranking ALL traders:
+
+| Approach | Query Pattern | Rows Processed | Estimated Time |
+|----------|--------------|----------------|----------------|
+| **Snapshots** | 2 index lookups per trader, subtract, sort | 500 rows (2 × 250) | **50-150 ms** |
+| **Trades** | Scan all trades, GROUP BY, SUM, sort | 87,500 rows (250 × 50 × 7) | **500-2000 ms** |
+
+**Ratio: Trades is ~10-20x slower for leaderboard**
+
+#### At Scale (1000+ traders)
+
+| Traders | Snapshots Leaderboard | Trades Leaderboard |
+|---------|----------------------|-------------------|
+| 250 | ~100 ms | ~1 sec |
+| 1,000 | ~300 ms | ~4 sec |
+| 5,000 | ~1 sec | ~20 sec |
+
+**Why the difference grows:**
+- Snapshots: O(n) where n = number of traders (2 lookups each)
+- Trades: O(n × t) where t = trades per trader in timeframe
+
+#### Cold Cache (Worst Case)
+
+When data is on disk (not in memory), add 10-50x latency:
+
+| Scenario | Snapshots | Trades |
+|----------|-----------|--------|
+| Warm cache | 100 ms | 1 sec |
+| Cold cache | 1-2 sec | 10-30 sec |
+
+### SQL Comparison
+
+**Snapshots (fast):**
+```sql
+-- Just 2 index lookups per trader, pre-computed values
+WITH earliest AS (
+  SELECT DISTINCT ON (trader_id) trader_id, total_pnl
+  FROM pnl_snapshots WHERE timestamp >= $start
+  ORDER BY trader_id, timestamp ASC
+),
+latest AS (
+  SELECT DISTINCT ON (trader_id) trader_id, total_pnl  
+  FROM pnl_snapshots WHERE timestamp >= $start
+  ORDER BY trader_id, timestamp DESC
+)
+SELECT latest.total_pnl - earliest.total_pnl as delta
+FROM latest JOIN earliest USING (trader_id)
+ORDER BY delta DESC LIMIT 50;
+-- Execution: ~100ms for 250 traders
+```
+
+**Trades (slow):**
+```sql
+-- Must scan and aggregate ALL trades in timeframe
+SELECT 
+  trader_id,
+  SUM(closed_pnl) as delta_pnl
+FROM trades
+WHERE timestamp >= $start
+GROUP BY trader_id
+ORDER BY delta_pnl DESC
+LIMIT 50;
+-- Execution: ~1-2 sec for 250 traders (87K rows scanned)
+```
+
+**Why snapshots are faster:**
+- Pre-aggregated: PnL already computed and stored
+- Delta calculation: Just subtract two values
+- Index-only scans possible (no table access)
+
+**Why trades use less storage but are slower:**
+- Each trade is ~150 bytes, but far fewer rows than snapshots
+- Every query requires full scan + aggregation
+- GROUP BY + SUM is expensive at scale
+
+### Can Caching Fix Trades-Only Slowness?
+
+**Short answer:** Partially, but with significant trade-offs.
+
+We have Redis in our stack. Here's how caching interacts with each approach:
+
+#### Caching with Snapshots (Current)
+
+```
+Request → Cache Hit? → Yes → Return (1-5ms)
+                    → No  → Query DB (100ms) → Cache → Return
+```
+
+| Scenario | Latency |
+|----------|---------|
+| Cache hit | 1-5 ms |
+| Cache miss | ~100 ms |
+| Cache miss penalty | **Low** |
+
+#### Caching with Trades-Only
+
+```
+Request → Cache Hit? → Yes → Return (1-5ms)
+                    → No  → Aggregate trades (1-2s) → Cache → Return
+```
+
+| Scenario | Latency |
+|----------|---------|
+| Cache hit | 1-5 ms |
+| Cache miss | ~1-2 sec |
+| Cache miss penalty | **High** |
+
+#### Why Caching Doesn't Fully Solve It
+
+| Problem | Impact |
+|---------|--------|
+| **Cold start** | First request after deploy/restart = 1-2s latency |
+| **Cache invalidation** | Every new trade changes the leaderboard. Invalidate too often = frequent cache misses |
+| **Staleness** | Cache for 5 min = leaderboard is 5 min stale. Acceptable for some use cases, not others |
+| **Cache stampede** | Multiple simultaneous cache misses = multiple slow queries = DB overload |
+| **Time range variety** | `/leaderboard?timeframe=7d` and `?timeframe=30d` need separate cache entries |
+
+#### Cache Miss Frequency
+
+Assuming 5-minute cache TTL and moderate traffic:
+
+| Requests/min | Cache misses/hour | With Snapshots | With Trades |
+|--------------|-------------------|----------------|-------------|
+| 10 | 12 | 12 × 100ms = 1.2s total | 12 × 1.5s = **18s total** |
+| 100 | 12 | Same (1.2s) | Same (18s) |
+
+The per-request cost is the same with cache hits, but **cache miss penalty** is 10-20x worse with trades.
+
+#### When Trades + Caching Works
+
+Trades-only with aggressive caching CAN work if:
+- ✅ You accept stale data (5+ minute cache TTL)
+- ✅ Low traffic (few cache misses)
+- ✅ Predictable query patterns (pre-warm cache)
+- ✅ Can tolerate cold-start latency
+
+#### Our Strategy: Snapshots + Light Caching
+
+We use Redis for:
+1. **Leaderboard cache** - 30-60 second TTL (acceptable staleness)
+2. **Rate limiting** - Prevent API abuse
+3. **BullMQ job queue** - Backfill job persistence
+
+Cache miss is only ~100ms, so we don't need aggressive caching or complex invalidation.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     CACHE MISS PENALTY COMPARISON                    │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  Snapshots:  Cache Miss → 100ms query → acceptable                  │
+│                                                                      │
+│  Trades:     Cache Miss → 1-2s query → noticeable lag               │
+│                          └─► Need longer TTL to compensate          │
+│                              └─► More stale data                    │
+│                                  └─► Worse UX or complex            │
+│                                      invalidation logic             │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Bottom line:** Caching helps both approaches, but snapshots have a much better "cache miss story" - when the cache fails, you still get fast responses.
+
+### What Hyperliquid API Provides
+
+Understanding the API data sources is critical for design decisions:
+
+#### 1. WebSocket `userFills` (Real-time)
+
+```typescript
+interface WebSocketFill {
+  coin: string;           // "BTC", "ETH"
+  px: string;             // execution price
+  sz: string;             // size
+  side: "B" | "A";        // buy or sell (ask)
+  time: number;           // unix ms timestamp
+  startPosition: string;  // position before this fill
+  dir: string;            // "Open Long", "Close Short", etc.
+  closedPnl: string;      // realized PnL from this fill
+  hash: string;           // unique trade hash
+  oid: number;            // order ID
+  fee: string;            // trading fee
+  feeToken: string;       // fee currency
+  tid: number;            // trade ID
+  liquidation?: {         // only if liquidation
+    liquidatedUser: string;
+    markPx: string;
+    method: string;
+  };
+}
+```
+
+**What we get:** Individual trade execution with `closedPnl` per fill.
+**Limitation:** Only for subscribed traders, only while connected.
+
+#### 2. REST `userFillsByTime` (Historical)
+
+```typescript
+// GET /info with body:
+{ "type": "userFillsByTime", "user": address, "startTime": unixMs, "endTime": unixMs }
+
+// Returns same structure as WebSocket fills
+// Rate limited: ~100 requests/minute
+// Max range: typically 7 days per request
+```
+
+**What we get:** Historical fills for backfill.
+**Limitation:** Rate limited, requires pagination for long history.
+
+#### 3. REST `clearinghouseState` (Current State)
+
+```typescript
+interface ClearinghouseState {
+  marginSummary: {
+    accountValue: string;
+    totalNtlPos: string;
+    totalRawUsd: string;
+    totalMarginUsed: string;
+  };
+  assetPositions: Array<{
+    position: {
+      coin: string;
+      entryPx: string;
+      positionValue: string;
+      returnOnEquity: string;
+      szi: string;              // signed size (negative = short)
+      unrealizedPnl: string;
+      liquidationPx: string;
+    };
+  }>;
+  crossMarginSummary: { ... };
+}
+```
+
+**What we get:** Current positions with `unrealizedPnl` per position.
+**Limitation:** Point-in-time snapshot, no history.
+
+#### 4. REST `userFunding` (Funding History)
+
+```typescript
+// GET /info with body:
+{ "type": "userFunding", "user": address, "startTime": unixMs, "endTime": unixMs }
+
+// Returns:
+Array<{
+  time: number;
+  coin: string;
+  usdc: string;      // funding payment (positive = received)
+  szi: string;       // position size at payment time
+  fundingRate: string;
+}>
+```
+
+**What we get:** Individual funding payments.
+**Limitation:** Same rate limits as fills.
+
+#### 5. REST `portfolio` (All-Time Summary)
+
+```typescript
+// GET /info with body:
+{ "type": "portfolio", "user": address }
+
+// Returns cumulative stats including:
+// - All-time PnL
+// - All-time volume
+// - Perp-specific stats
+```
+
+**What we get:** Authoritative all-time totals from Hyperliquid.
+**Limitation:** No breakdown by time period, just cumulative.
+
+### Current Implementation (Snapshots Only)
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    CURRENT DATA FLOW                                 │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  WebSocket Fills ─┬─► Calculate PnL ─► pnl_snapshots (every 30s)    │
+│                   │   (in-memory)                                    │
+│  REST Positions ──┘                                                  │
+│                                                                      │
+│  Backfill Job ────► Reconstruct snapshots from fills + funding      │
+│                     (fills NOT stored, only used for calculation)   │
+│                                                                      │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │ pnl_snapshots                                                │    │
+│  │ ─────────────────────────────────────────────────────────── │    │
+│  │ trader_id | timestamp | total_pnl | realized_pnl | volume   │    │
+│  │ 1         | 10:00:00  | 5000      | 4500         | 100000   │    │
+│  │ 1         | 10:00:30  | 5100      | 4500         | 100000   │    │
+│  │ 1         | 10:01:00  | 4900      | 4600         | 102000   │    │
+│  └─────────────────────────────────────────────────────────────┘    │
+│                                                                      │
+│  Interval PnL = snapshot[end].total_pnl - snapshot[start].total_pnl │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Limitations of Current Approach:**
+
+1. **Boundary Precision:** ±30 seconds on interval boundaries
+2. **No Per-Trade Analytics:** Cannot answer "what was their best trade?"
+3. **No Per-Asset Breakdown:** Cannot separate BTC PnL from ETH PnL
+4. **Gap Sensitivity:** Missing snapshots = incorrect delta calculations
+5. **No Trade Metadata:** Cannot calculate win rate, avg size, frequency
+
+### Recommended: Snapshots + Trades (Hybrid)
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    RECOMMENDED DATA FLOW                             │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  WebSocket Fills ─┬─► trades table (individual fills)               │
+│                   │                                                  │
+│                   └─► Calculate PnL ─► pnl_snapshots (every 5min)   │
+│                       (in-memory)                                    │
+│                                                                      │
+│  Backfill Job ────► trades table (historical fills)                 │
+│                 └─► pnl_snapshots (reconstructed)                   │
+│                                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │ trades                                                        │   │
+│  │ ──────────────────────────────────────────────────────────── │   │
+│  │ trader_id | timestamp | coin | side | size | price | pnl    │   │
+│  │ 1         | 10:00:15  | BTC  | buy  | 0.1  | 50000 | 0      │   │
+│  │ 1         | 10:00:45  | BTC  | sell | 0.1  | 50500 | 50     │   │
+│  │ 1         | 10:01:20  | ETH  | buy  | 2.0  | 3000  | 0      │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │ pnl_snapshots (less frequent, for quick aggregations)        │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                                                                      │
+│  Interval PnL Options:                                               │
+│  1. Quick: snapshot[end] - snapshot[start] (±5min precision)        │
+│  2. Exact: SUM(trades.closed_pnl) WHERE timestamp BETWEEN a AND b   │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### API Capabilities Summary
+
+| Data Need | API Source | Frequency | Notes |
+|-----------|-----------|-----------|-------|
+| Real-time fills | WebSocket `userFills` | Per-trade | Must subscribe |
+| Historical fills | REST `userFillsByTime` | On-demand | Rate limited |
+| Current positions | REST `clearinghouseState` | Polling | For unrealized PnL |
+| Funding payments | REST `userFunding` | On-demand | Rate limited |
+| All-time totals | REST `portfolio` | On-demand | Authoritative |
+
+### Decision Matrix
+
+Choose your approach based on requirements:
+
+| If you need... | Use... |
+|----------------|--------|
+| Simple interval leaderboards only | Snapshots Only (current) |
+| Per-trade analytics (win rate, etc.) | Snapshots + Trades |
+| Exact time boundaries | Snapshots + Trades |
+| Per-asset PnL breakdown | Snapshots + Trades |
+| Minimum storage footprint | Snapshots Only (5min interval) |
+| Maximum query flexibility | Trades Only (expensive queries) |
+
+### Design Decision: Why Snapshots Only
+
+**Our Choice:** Snapshots Only (current implementation)
+
+**Rationale:** The original requirements (see REQUIREMENTS.md) are entirely PnL-focused. Snapshots cover 100% of the required functionality:
+
+| Original Requirement | Covered by Snapshots? | How |
+|---------------------|----------------------|-----|
+| Realized PnL | ✅ Yes | Stored in `realized_pnl` column |
+| Unrealized PnL | ✅ Yes | Stored in `unrealized_pnl` column |
+| Total PnL | ✅ Yes | Stored in `total_pnl` column |
+| Volume | ✅ Yes | Stored in `total_volume` column |
+| Position count | ✅ Yes | Stored in `open_positions` column |
+| Peak PnL | ✅ Yes | `MAX(total_pnl)` from snapshots |
+| Max drawdown | ✅ Yes | Calculable from snapshot series |
+| Arbitrary time ranges | ✅ Yes | Delta between snapshots (±30s precision) |
+| Leaderboard (bonus) | ✅ Yes | Query latest snapshots, rank by PnL |
+| Delta PnL (bonus) | ✅ Yes | `end_snapshot - start_snapshot` |
+| Backfill (bonus) | ✅ Yes | Reconstruct snapshots from historical fills |
+
+**What's NOT in requirements (would need trades):**
+
+| Feature | Required? | Notes |
+|---------|----------|-------|
+| Per-asset PnL (BTC vs ETH) | ❌ No | Not in spec |
+| Win rate | ❌ No | Not in spec |
+| Average trade size | ❌ No | Not in spec |
+| Individual trade history | ❌ No | Not in spec |
+
+**Trade-off Accepted:**
+- Interval boundaries have ±30 second precision (configurable)
+- Cannot retroactively add per-trade analytics without re-backfilling
+
+**Future Expansion:**
+If requirements expand to need per-trade analytics, add a `trades` table alongside snapshots (hybrid approach). The API already provides trade-level data; we simply don't persist it currently.
+
 ---
 
 ## PnL Calculation Logic

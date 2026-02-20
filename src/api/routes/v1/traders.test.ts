@@ -9,15 +9,24 @@ vi.mock('../../../hyperliquid/client.js', () => ({
   },
 }));
 
-vi.mock('../../../streams/index.js', () => ({
+vi.mock('../../../state/trader-state.js', () => ({
   initializeTraderState: vi.fn(),
   getTraderState: vi.fn(),
+  removeTraderState: vi.fn(),
+}));
+
+vi.mock('../../../streams/sources/hybrid.stream.js', () => ({
+  getHybridDataStream: vi.fn(() => ({
+    subscribeTrader: vi.fn(),
+    unsubscribeTrader: vi.fn(),
+  })),
 }));
 
 vi.mock('../../../storage/db/repositories/index.js', () => ({
   tradersRepo: {
     findByAddress: vi.fn(),
     findOrCreate: vi.fn(),
+    setActive: vi.fn(),
   },
   snapshotsRepo: {
     getForTrader: vi.fn(),
@@ -26,8 +35,31 @@ vi.mock('../../../storage/db/repositories/index.js', () => ({
   },
 }));
 
+vi.mock('../../../utils/config.js', () => ({
+  config: {
+    USE_HYBRID_MODE: true,
+    LOG_LEVEL: 'info',
+    REDIS_URL: 'redis://localhost:6379',
+    BACKFILL_DAYS: 30,
+  },
+}));
+
+vi.mock('../../../jobs/backfill.js', () => ({
+  scheduleBackfill: vi.fn().mockResolvedValue({ id: 'test-job-id' }),
+  getBackfillStatus: vi.fn().mockResolvedValue({ isActive: false, jobs: [] }),
+}));
+
+vi.mock('../../../utils/logger.js', () => ({
+  logger: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  },
+}));
+
 import { hyperliquidClient } from '../../../hyperliquid/client.js';
-import { initializeTraderState, getTraderState } from '../../../streams/index.js';
+import { initializeTraderState, getTraderState } from '../../../state/trader-state.js';
 import { tradersRepo, snapshotsRepo } from '../../../storage/db/repositories/index.js';
 import { toDecimal } from '../../../utils/decimal.js';
 

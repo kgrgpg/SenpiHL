@@ -8,6 +8,7 @@ import {
   initializeTraderState,
   removeTraderState,
 } from '../../../state/trader-state.js';
+import { scheduleBackfill, getBackfillStatus } from '../../../jobs/backfill.js';
 import { toDecimal } from '../../../utils/decimal.js';
 import { config } from '../../../utils/config.js';
 import { logger } from '../../../utils/logger.js';
@@ -135,15 +136,29 @@ export async function tradersRoutes(fastify: FastifyInstance): Promise<void> {
     '/traders/:address/subscribe',
     async (request, reply) => {
       const { address } = request.params;
-      // backfill_days can be used for triggering backfill job in future
-      const _backfillDays = request.body?.backfill_days ?? 30;
+      const backfillDays = request.body?.backfill_days ?? 30;
 
       if (!hyperliquidClient.isValidAddress(address)) {
         return reply.status(400).send({ error: 'Invalid Ethereum address' });
       }
 
+      // Check if already tracking
+      const existingState = getTraderState(address);
+      if (existingState) {
+        const trader = await tradersRepo.findByAddress(address);
+        const backfillStatus = await getBackfillStatus(address);
+        return {
+          address,
+          trader_id: trader?.id ?? existingState.traderId,
+          status: 'tracking',
+          mode: config.USE_HYBRID_MODE ? 'hybrid' : 'legacy',
+          message: 'Already tracking this trader',
+          backfill: backfillStatus,
+        };
+      }
+
       const trader = await tradersRepo.findOrCreate(address);
-      
+
       // Initialize state
       initializeTraderState(trader.id, address);
 
@@ -156,12 +171,21 @@ export async function tradersRoutes(fastify: FastifyInstance): Promise<void> {
         logger.info({ address, traderId: trader.id, mode: 'legacy' }, 'Trader subscribed');
       }
 
+      // Schedule backfill job for historical data
+      const backfillJob = await scheduleBackfill(address, backfillDays);
+      logger.info(
+        { address, traderId: trader.id, backfillDays, jobId: backfillJob.id },
+        'Backfill job scheduled'
+      );
+
       return {
         address,
         trader_id: trader.id,
         status: 'tracking',
         mode: config.USE_HYBRID_MODE ? 'hybrid' : 'legacy',
         message: 'Subscribed successfully',
+        backfill_job_id: backfillJob.id,
+        backfill_days: backfillDays,
       };
     }
   );
@@ -251,4 +275,71 @@ export async function tradersRoutes(fastify: FastifyInstance): Promise<void> {
         : '0',
     };
   });
+
+  /**
+   * GET /v1/traders/:address/backfill
+   * Get backfill job status for a trader
+   */
+  fastify.get<{ Params: AddressParams }>('/traders/:address/backfill', async (request, reply) => {
+    const { address } = request.params;
+
+    if (!hyperliquidClient.isValidAddress(address)) {
+      return reply.status(400).send({ error: 'Invalid Ethereum address' });
+    }
+
+    const trader = await tradersRepo.findByAddress(address);
+    if (!trader) {
+      return reply.status(404).send({ error: 'Trader not found' });
+    }
+
+    const status = await getBackfillStatus(address);
+
+    return {
+      address,
+      trader_id: trader.id,
+      ...status,
+    };
+  });
+
+  /**
+   * POST /v1/traders/:address/backfill
+   * Manually trigger backfill for a trader
+   */
+  fastify.post<{ Params: AddressParams; Body: { days?: number } }>(
+    '/traders/:address/backfill',
+    async (request, reply) => {
+      const { address } = request.params;
+      const days = request.body?.days ?? 30;
+
+      if (!hyperliquidClient.isValidAddress(address)) {
+        return reply.status(400).send({ error: 'Invalid Ethereum address' });
+      }
+
+      const trader = await tradersRepo.findByAddress(address);
+      if (!trader) {
+        return reply.status(404).send({ error: 'Trader not found. Subscribe first.' });
+      }
+
+      // Check if backfill already running
+      const currentStatus = await getBackfillStatus(address);
+      if (currentStatus.isActive) {
+        return reply.status(409).send({
+          error: 'Backfill already in progress',
+          jobs: currentStatus.jobs,
+        });
+      }
+
+      // Schedule backfill
+      const job = await scheduleBackfill(address, days);
+      logger.info({ address, days, jobId: job.id }, 'Manual backfill scheduled');
+
+      return {
+        address,
+        trader_id: trader.id,
+        backfill_job_id: job.id,
+        days,
+        message: `Backfill scheduled for ${days} days of historical data`,
+      };
+    }
+  );
 }

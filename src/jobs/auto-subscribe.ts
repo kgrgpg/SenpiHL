@@ -29,9 +29,11 @@ import { logger } from '../utils/logger.js';
 import { config } from '../utils/config.js';
 import { getHybridDataStream } from '../streams/sources/hybrid.stream.js';
 import { initializeTraderState } from '../state/trader-state.js';
+import { scheduleBackfill } from './backfill.js';
 
 const MAX_SUBSCRIPTIONS_PER_RUN = 10;
 const MIN_PRIORITY = 0;
+const AUTO_BACKFILL_DAYS = 7; // Shorter backfill for auto-discovered traders
 
 interface QueuedTrader {
   id: number;
@@ -100,11 +102,11 @@ function subscribeTrader$(trader: QueuedTrader): Observable<void> {
       [trader.address.toLowerCase(), trader.source]
     )
   ).pipe(
-    tap((result) => {
+    mergeMap((result) => {
       const traderId = result.rows[0]?.id;
       if (!traderId) {
         logger.warn({ address: trader.address }, 'Failed to get trader ID after insert');
-        return;
+        return of(void 0);
       }
 
       // Initialize trader state
@@ -115,8 +117,25 @@ function subscribeTrader$(trader: QueuedTrader): Observable<void> {
         const hybridStream = getHybridDataStream();
         hybridStream.subscribeTrader(trader.address.toLowerCase());
       }
-    }),
-    map(() => void 0)
+
+      // Schedule backfill for historical data (7 days for auto-discovered)
+      return from(scheduleBackfill(trader.address.toLowerCase(), AUTO_BACKFILL_DAYS)).pipe(
+        tap((job) =>
+          logger.info(
+            { address: trader.address, jobId: job.id, days: AUTO_BACKFILL_DAYS },
+            'Backfill scheduled for auto-discovered trader'
+          )
+        ),
+        map(() => void 0),
+        catchError((err) => {
+          logger.error(
+            { error: (err as Error).message, address: trader.address },
+            'Failed to schedule backfill'
+          );
+          return of(void 0);
+        })
+      );
+    })
   );
 }
 

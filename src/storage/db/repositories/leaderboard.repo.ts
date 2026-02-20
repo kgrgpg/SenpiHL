@@ -32,6 +32,7 @@ export interface AllTimeLeaderboardRow {
 
 /**
  * Get time-bounded leaderboard from our calculated snapshots
+ * Uses DELTA calculation: (latest PnL) - (earliest PnL in timeframe)
  * Use for: 1d, 7d, 30d rankings
  */
 export async function getLeaderboard(
@@ -42,41 +43,60 @@ export async function getLeaderboard(
   const days = timeframe === '1d' ? 1 : timeframe === '7d' ? 7 : 30;
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-  const orderColumn = metric === 'volume' ? 'volume' : metric;
+  const orderColumn = metric === 'volume' ? 'delta_volume' : `delta_${metric}`;
 
+  // Calculate DELTA between earliest and latest snapshots in the timeframe
   const result = await query<LeaderboardRow>(
-    `WITH latest_snapshots AS (
+    `WITH earliest_snapshots AS (
       SELECT DISTINCT ON (trader_id)
         trader_id,
-        total_pnl,
-        realized_pnl,
-        unrealized_pnl,
-        total_volume as volume
+        total_pnl as start_total_pnl,
+        realized_pnl as start_realized_pnl,
+        unrealized_pnl as start_unrealized_pnl,
+        total_volume as start_volume
+      FROM pnl_snapshots
+      WHERE timestamp >= $1
+      ORDER BY trader_id, timestamp ASC
+    ),
+    latest_snapshots AS (
+      SELECT DISTINCT ON (trader_id)
+        trader_id,
+        total_pnl as end_total_pnl,
+        realized_pnl as end_realized_pnl,
+        unrealized_pnl as end_unrealized_pnl,
+        total_volume as end_volume
       FROM pnl_snapshots
       WHERE timestamp >= $1
       ORDER BY trader_id, timestamp DESC
     ),
-    trade_counts AS (
-      SELECT trader_id, COUNT(*) as trade_count
-      FROM trades
-      WHERE timestamp >= $1
-      GROUP BY trader_id
+    delta_pnl AS (
+      SELECT 
+        ls.trader_id,
+        ls.end_total_pnl,
+        ls.end_realized_pnl,
+        ls.end_unrealized_pnl,
+        ls.end_volume,
+        (ls.end_total_pnl::numeric - COALESCE(es.start_total_pnl::numeric, 0)) as delta_total_pnl,
+        (ls.end_realized_pnl::numeric - COALESCE(es.start_realized_pnl::numeric, 0)) as delta_realized_pnl,
+        (ls.end_unrealized_pnl::numeric - COALESCE(es.start_unrealized_pnl::numeric, 0)) as delta_unrealized_pnl,
+        (ls.end_volume::numeric - COALESCE(es.start_volume::numeric, 0)) as delta_volume
+      FROM latest_snapshots ls
+      LEFT JOIN earliest_snapshots es ON es.trader_id = ls.trader_id
     )
     SELECT 
-      ROW_NUMBER() OVER (ORDER BY ls.${orderColumn} DESC) as rank,
+      ROW_NUMBER() OVER (ORDER BY dp.${orderColumn} DESC) as rank,
       t.address,
       t.id as trader_id,
-      ls.total_pnl,
-      ls.realized_pnl,
-      ls.unrealized_pnl,
-      ls.volume,
-      COALESCE(tc.trade_count, 0)::int as trade_count,
+      dp.delta_total_pnl::text as total_pnl,
+      dp.delta_realized_pnl::text as realized_pnl,
+      dp.delta_unrealized_pnl::text as unrealized_pnl,
+      dp.delta_volume::text as volume,
+      0::int as trade_count,
       t.first_seen_at as tracking_since,
       'calculated' as data_source
-    FROM latest_snapshots ls
-    JOIN traders t ON t.id = ls.trader_id
-    LEFT JOIN trade_counts tc ON tc.trader_id = ls.trader_id
-    ORDER BY ls.${orderColumn} DESC
+    FROM delta_pnl dp
+    JOIN traders t ON t.id = dp.trader_id
+    ORDER BY dp.${orderColumn} DESC
     LIMIT $2`,
     [since, limit]
   );
@@ -186,7 +206,7 @@ export async function getAllTimeLeaderboard(
 }
 
 /**
- * Get a specific trader's rank
+ * Get a specific trader's rank (uses delta calculation)
  */
 export async function getTraderRank(
   traderId: number,
@@ -203,24 +223,43 @@ export async function getTraderRank(
   const days = timeframe === '1d' ? 1 : timeframe === '7d' ? 7 : 30;
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-  const orderColumn = metric === 'volume' ? 'volume' : metric;
+  const orderColumn = metric === 'volume' ? 'delta_volume' : `delta_${metric}`;
 
   const result = await query<{ rank: number }>(
-    `WITH latest_snapshots AS (
+    `WITH earliest_snapshots AS (
       SELECT DISTINCT ON (trader_id)
         trader_id,
-        total_pnl,
-        realized_pnl,
-        total_volume as volume
+        total_pnl as start_total_pnl,
+        realized_pnl as start_realized_pnl,
+        total_volume as start_volume
+      FROM pnl_snapshots
+      WHERE timestamp >= $1
+      ORDER BY trader_id, timestamp ASC
+    ),
+    latest_snapshots AS (
+      SELECT DISTINCT ON (trader_id)
+        trader_id,
+        total_pnl as end_total_pnl,
+        realized_pnl as end_realized_pnl,
+        total_volume as end_volume
       FROM pnl_snapshots
       WHERE timestamp >= $1
       ORDER BY trader_id, timestamp DESC
+    ),
+    delta_pnl AS (
+      SELECT 
+        ls.trader_id,
+        (ls.end_total_pnl::numeric - COALESCE(es.start_total_pnl::numeric, 0)) as delta_total_pnl,
+        (ls.end_realized_pnl::numeric - COALESCE(es.start_realized_pnl::numeric, 0)) as delta_realized_pnl,
+        (ls.end_volume::numeric - COALESCE(es.start_volume::numeric, 0)) as delta_volume
+      FROM latest_snapshots ls
+      LEFT JOIN earliest_snapshots es ON es.trader_id = ls.trader_id
     ),
     ranked AS (
       SELECT 
         trader_id,
         ROW_NUMBER() OVER (ORDER BY ${orderColumn} DESC) as rank
-      FROM latest_snapshots
+      FROM delta_pnl
     )
     SELECT rank FROM ranked WHERE trader_id = $2`,
     [since, traderId]
