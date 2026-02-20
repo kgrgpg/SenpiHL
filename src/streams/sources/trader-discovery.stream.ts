@@ -1,18 +1,18 @@
 /**
  * Trader Discovery Stream
- * 
+ *
  * Automatically discovers new traders by polling recentTrades from the REST API.
  * The recentTrades endpoint includes both buyer and seller addresses!
- * 
- * This solves the "how do we find traders" problem without scraping or paid APIs!
- * 
+ *
+ * Uses consistent RxJS patterns throughout.
+ *
  * Flow:
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │  Poll recentTrades ──▶ Extract addresses ──▶ Check DB ──▶ Queue new    │
  * └─────────────────────────────────────────────────────────────────────────┘
  */
 
-import { Observable, Subject, timer, EMPTY, from } from 'rxjs';
+import { Observable, Subject, timer, EMPTY, from, of, firstValueFrom } from 'rxjs';
 import {
   filter,
   mergeMap,
@@ -20,8 +20,11 @@ import {
   catchError,
   share,
   takeUntil,
-  switchMap,
   tap,
+  map,
+  concatMap,
+  delay,
+  toArray,
 } from 'rxjs/operators';
 
 import { query } from '../../storage/db/client.js';
@@ -43,7 +46,7 @@ interface RecentTrade {
   time: number;
   hash: string;
   tid: number;
-  users: string[]; // [buyer, seller] addresses
+  users: string[];
 }
 
 interface DiscoveredTrader {
@@ -63,23 +66,14 @@ export class TraderDiscoveryStream {
 
   constructor() {}
 
-  /**
-   * Check if discovery is running
-   */
   get isRunning(): boolean {
     return this._isRunning;
   }
 
-  /**
-   * Get count of discovered traders this session
-   */
   get discoveredCount(): number {
     return this._discoveredCount;
   }
 
-  /**
-   * Stream of newly discovered traders
-   */
   get discoveries$(): Observable<DiscoveredTrader> {
     return this.discovered$.asObservable().pipe(share());
   }
@@ -91,17 +85,16 @@ export class TraderDiscoveryStream {
     if (this._isRunning) return;
     this._isRunning = true;
 
-    await this.loadKnownAddresses();
+    await firstValueFrom(this.loadKnownAddresses$());
     this.startPolling();
     this.setupAutoQueueing();
 
-    logger.info({ coins: DISCOVERY_COINS, intervalMs: DISCOVERY_POLL_INTERVAL_MS }, 
-      'Trader discovery started');
+    logger.info(
+      { coins: DISCOVERY_COINS, intervalMs: DISCOVERY_POLL_INTERVAL_MS },
+      'Trader discovery started'
+    );
   }
 
-  /**
-   * Stop discovery
-   */
   stop(): void {
     this.destroy$.next();
     this._isRunning = false;
@@ -109,110 +102,122 @@ export class TraderDiscoveryStream {
   }
 
   /**
-   * Load addresses we already know about
+   * Load addresses we already know about (returns Observable)
    */
-  private async loadKnownAddresses(): Promise<void> {
-    try {
-      const result = await query<{ address: string }>('SELECT address FROM traders');
-      for (const row of result.rows) {
-        this.knownAddresses.add(row.address.toLowerCase());
-      }
-      
-      // Also load addresses already in discovery queue
-      const queueResult = await query<{ address: string }>('SELECT address FROM trader_discovery_queue');
-      for (const row of queueResult.rows) {
-        this.knownAddresses.add(row.address.toLowerCase());
-      }
-      
-      logger.info({ count: this.knownAddresses.size }, 'Loaded known addresses for discovery filter');
-    } catch (err) {
-      logger.error({ error: (err as Error).message }, 'Failed to load known addresses');
-    }
+  private loadKnownAddresses$(): Observable<void> {
+    return from(query<{ address: string }>('SELECT address FROM traders')).pipe(
+      tap((result) => {
+        for (const row of result.rows) {
+          this.knownAddresses.add(row.address.toLowerCase());
+        }
+      }),
+      mergeMap(() => from(query<{ address: string }>('SELECT address FROM trader_discovery_queue'))),
+      tap((queueResult) => {
+        for (const row of queueResult.rows) {
+          this.knownAddresses.add(row.address.toLowerCase());
+        }
+        logger.info(
+          { count: this.knownAddresses.size },
+          'Loaded known addresses for discovery filter'
+        );
+      }),
+      map(() => void 0),
+      catchError((err) => {
+        logger.error({ error: (err as Error).message }, 'Failed to load known addresses');
+        return of(void 0);
+      })
+    );
   }
 
   /**
-   * Start polling recentTrades for each coin
+   * Start polling using RxJS timer
    */
   private startPolling(): void {
-    // Immediate first run
-    this.pollAllCoins();
-
-    // Then periodic polling
-    timer(DISCOVERY_POLL_INTERVAL_MS, DISCOVERY_POLL_INTERVAL_MS).pipe(
-      takeUntil(this.destroy$),
-      tap(() => this.pollAllCoins()),
-    ).subscribe();
+    timer(0, DISCOVERY_POLL_INTERVAL_MS)
+      .pipe(
+        takeUntil(this.destroy$),
+        mergeMap(() => this.pollAllCoins$())
+      )
+      .subscribe();
   }
 
   /**
-   * Poll recentTrades for all discovery coins
+   * Poll all discovery coins (fully RxJS-based)
    */
-  private async pollAllCoins(): Promise<void> {
+  private pollAllCoins$(): Observable<void> {
     const beforeCount = this.seenAddresses.size;
 
-    for (const coin of DISCOVERY_COINS) {
-      try {
-        const trades = await this.fetchRecentTrades(coin);
-        for (const trade of trades) {
-          if (trade.users) {
-            for (const address of trade.users) {
-              this.checkAddress(address, coin);
+    return from(DISCOVERY_COINS).pipe(
+      concatMap((coin) =>
+        this.fetchRecentTrades$(coin).pipe(
+          tap((trades) => {
+            for (const trade of trades) {
+              if (trade.users) {
+                for (const address of trade.users) {
+                  this.checkAddress(address, coin);
+                }
+              }
             }
-          }
+          }),
+          delay(100), // Small delay between coins
+          catchError((err) => {
+            logger.warn({ coin, error: (err as Error).message }, 'Failed to fetch trades for coin');
+            return of([]);
+          })
+        )
+      ),
+      toArray(),
+      tap(() => {
+        const newCount = this.seenAddresses.size - beforeCount;
+        if (newCount > 0) {
+          logger.info(
+            { newAddresses: newCount, totalSeen: this.seenAddresses.size },
+            'Discovery poll completed'
+          );
         }
-        // Small delay between coins to be gentle on API
-        await this.sleep(100);
-      } catch (err) {
-        logger.warn({ coin, error: (err as Error).message }, 'Failed to fetch trades for coin');
-      }
-    }
-
-    const newCount = this.seenAddresses.size - beforeCount;
-    if (newCount > 0) {
-      logger.info({ newAddresses: newCount, totalSeen: this.seenAddresses.size }, 
-        'Discovery poll completed');
-    }
+      }),
+      map(() => void 0)
+    );
   }
 
   /**
-   * Fetch recent trades for a coin
+   * Fetch recent trades for a coin (returns Observable)
    */
-  private async fetchRecentTrades(coin: string): Promise<RecentTrade[]> {
-    const response = await fetch(API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'recentTrades', coin }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    return response.json() as Promise<RecentTrade[]>;
+  private fetchRecentTrades$(coin: string): Observable<RecentTrade[]> {
+    return from(
+      fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'recentTrades', coin }),
+      })
+    ).pipe(
+      mergeMap((response) => {
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return from(response.json() as Promise<RecentTrade[]>);
+      })
+    );
   }
 
   /**
-   * Check if address is new and emit if so
+   * Check if address is new and emit if so (synchronous)
    */
   private checkAddress(address: string, coin: string): void {
     const normalized = address.toLowerCase();
 
-    // Skip if we've seen this address already (in this session)
     if (this.seenAddresses.has(normalized)) {
       return;
     }
 
-    // Skip if address is already known
     if (this.knownAddresses.has(normalized)) {
       return;
     }
 
-    // Mark as seen
     this.seenAddresses.add(normalized);
-    this.knownAddresses.add(normalized); // Prevent re-queuing
+    this.knownAddresses.add(normalized);
     this._discoveredCount++;
 
-    // Emit discovery
     this.discovered$.next({
       address,
       discoveredAt: Date.now(),
@@ -225,41 +230,41 @@ export class TraderDiscoveryStream {
    * Automatically queue discovered traders to the database
    */
   private setupAutoQueueing(): void {
-    this.discovered$.pipe(
-      bufferTime(5000), // Batch every 5 seconds
-      filter((batch) => batch.length > 0),
-      mergeMap((batch) => this.queueTraders(batch)),
-      takeUntil(this.destroy$),
-      catchError((err) => {
-        logger.error({ error: (err as Error).message }, 'Error queueing discovered traders');
-        return EMPTY;
-      })
-    ).subscribe();
+    this.discovered$
+      .pipe(
+        bufferTime(5000),
+        filter((batch) => batch.length > 0),
+        mergeMap((batch) => this.queueTraders$(batch)),
+        takeUntil(this.destroy$),
+        catchError((err) => {
+          logger.error({ error: (err as Error).message }, 'Error queueing discovered traders');
+          return EMPTY;
+        })
+      )
+      .subscribe();
   }
 
   /**
-   * Add discovered traders to the discovery queue
+   * Add discovered traders to the discovery queue (fully RxJS-based)
    */
-  private async queueTraders(traders: DiscoveredTrader[]): Promise<void> {
-    for (const trader of traders) {
-      try {
-        await query(
-          `INSERT INTO trader_discovery_queue (address, source, priority, notes)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (address) DO NOTHING`,
-          [trader.address, 'market_trade', 1, `Discovered trading ${trader.coin}`]
-        );
-      } catch (err) {
-        // Ignore duplicate errors
-      }
-    }
-
-    logger.info({ count: traders.length }, 'Queued discovered traders');
+  private queueTraders$(traders: DiscoveredTrader[]): Observable<void> {
+    return from(traders).pipe(
+      mergeMap((trader) =>
+        from(
+          query(
+            `INSERT INTO trader_discovery_queue (address, source, priority, notes)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (address) DO NOTHING`,
+            [trader.address, 'market_trade', 1, `Discovered trading ${trader.coin}`]
+          )
+        ).pipe(catchError(() => of(null))) // Ignore duplicate errors
+      ),
+      toArray(),
+      tap(() => logger.info({ count: traders.length }, 'Queued discovered traders')),
+      map(() => void 0)
+    );
   }
 
-  /**
-   * Get statistics about discovery
-   */
   getStats(): { seenThisSession: number; knownTotal: number; isRunning: boolean } {
     return {
       seenThisSession: this.seenAddresses.size,
@@ -267,13 +272,8 @@ export class TraderDiscoveryStream {
       isRunning: this.isRunning,
     };
   }
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
 }
 
-// Singleton instance
 let discoveryInstance: TraderDiscoveryStream | null = null;
 
 export function getTraderDiscoveryStream(): TraderDiscoveryStream {

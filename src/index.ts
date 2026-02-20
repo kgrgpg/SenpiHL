@@ -19,13 +19,23 @@
  * └─────────────────────────────────────────────────────────────────────────┘
  */
 
-import { Subject, Subscription, EMPTY } from 'rxjs';
-import { takeUntil, catchError, tap, filter, bufferTime, mergeMap } from 'rxjs/operators';
+import { Subject, Subscription, EMPTY, from, interval, timer, of, firstValueFrom } from 'rxjs';
+import {
+  takeUntil,
+  catchError,
+  tap,
+  filter,
+  bufferTime,
+  mergeMap,
+  map,
+  startWith,
+  switchMap,
+} from 'rxjs/operators';
 import type { Worker } from 'bullmq';
 
 import { createServer, startServer, stopServer } from './api/server.js';
 import { createBackfillWorker } from './jobs/backfill.js';
-import { startAutoSubscribeJob, processDiscoveryQueue } from './jobs/auto-subscribe.js';
+import { processDiscoveryQueue$ } from './jobs/auto-subscribe.js';
 import {
   createSnapshot,
   parsePositionFromApi,
@@ -67,11 +77,11 @@ import { createMainPipeline } from './streams/index.js';
 
 let shutdown$ = new Subject<void>();
 let pipelineSubscription: Subscription | null = null;
+let autoSubscribeSubscription: Subscription | null = null;
 let backfillWorker: Worker | null = null;
-let autoSubscribeInterval: ReturnType<typeof setInterval> | null = null;
 
 /**
- * Process a fill event from WebSocket
+ * Process a fill event from WebSocket (pure function)
  */
 function processHybridFill(address: string, fill: WebSocketFill): SnapshotData | null {
   let state = getTraderState(address);
@@ -97,7 +107,7 @@ function processHybridFill(address: string, fill: WebSocketFill): SnapshotData |
 }
 
 /**
- * Process a snapshot event from polling
+ * Process a snapshot event from polling (pure function)
  */
 function processHybridSnapshot(
   address: string,
@@ -129,10 +139,10 @@ function processHybridSnapshot(
 }
 
 /**
- * Save snapshots to database
+ * Save snapshots to database (returns Observable)
  */
-async function saveSnapshots(snapshots: SnapshotData[]): Promise<void> {
-  if (snapshots.length === 0) return;
+function saveSnapshots$(snapshots: SnapshotData[]) {
+  if (snapshots.length === 0) return of(void 0);
 
   const inserts = snapshots.map((s) => ({
     traderId: s.traderId,
@@ -147,16 +157,69 @@ async function saveSnapshots(snapshots: SnapshotData[]): Promise<void> {
     accountValue: s.accountValue,
   }));
 
-  await snapshotsRepo.insertMany(inserts);
+  return from(snapshotsRepo.insertMany(inserts));
 }
 
+/**
+ * Process a single hybrid event (returns Observable)
+ */
+function processHybridEvent$(event: HybridEvent) {
+  return from(tradersRepo.findByAddress(event.address)).pipe(
+    mergeMap((trader) => {
+      if (!trader) {
+        return of(null);
+      }
+
+      initializeTraderState(trader.id, event.address);
+
+      let snapshot: SnapshotData | null = null;
+      if (event.type === 'fill') {
+        snapshot = processHybridFill(event.address, event.data as WebSocketFill);
+      } else if (event.type === 'snapshot') {
+        snapshot = processHybridSnapshot(
+          event.address,
+          event.data as HyperliquidClearinghouseState
+        );
+      }
+
+      return of(snapshot);
+    }),
+    catchError((err) => {
+      logger.error({ error: (err as Error).message, address: event.address }, 'Error processing event');
+      return of(null);
+    })
+  );
+}
+
+/**
+ * Create the auto-subscribe stream (RxJS interval-based)
+ */
+function createAutoSubscribeStream$() {
+  return interval(60000).pipe(
+    startWith(0), // Run immediately
+    switchMap(() =>
+      processDiscoveryQueue$().pipe(
+        tap((stats) => {
+          if (stats.processed > 0) {
+            logger.info(stats, 'Discovery queue processing complete');
+          }
+        }),
+        catchError((err) => {
+          logger.error({ error: (err as Error).message }, 'Auto-subscribe job failed');
+          return of({ processed: 0, subscribed: 0, skipped: 0 });
+        })
+      )
+    ),
+    takeUntil(shutdown$)
+  );
+}
 
 /**
  * Bootstrap the application in HYBRID MODE
  * - WebSocket for real-time fills
  * - Polling for position snapshots (every 5 min)
  * - Auto-discovery of new traders
- * - Auto-subscribe job
+ * - Auto-subscribe job (RxJS interval)
  */
 async function bootstrapHybridMode(): Promise<void> {
   logger.info('Starting in HYBRID MODE (WebSocket + Polling)');
@@ -165,17 +228,8 @@ async function bootstrapHybridMode(): Promise<void> {
   const hybridStream = getHybridDataStream();
   hybridStream.connect();
 
-  // Wait for WebSocket connection
-  await new Promise<void>((resolve) => {
-    const checkConnection = setInterval(() => {
-      // Give it a moment to connect
-      setTimeout(() => {
-        clearInterval(checkConnection);
-        resolve();
-      }, 2000);
-    }, 100);
-  });
-
+  // Wait for WebSocket connection using RxJS timer
+  await firstValueFrom(timer(2000));
   logger.info('WebSocket connected');
 
   // Load existing traders and subscribe them
@@ -186,7 +240,7 @@ async function bootstrapHybridMode(): Promise<void> {
   }
   logger.info({ count: existingTraders.length }, 'Subscribed existing traders to hybrid stream');
 
-  // Process hybrid events and save to database
+  // Process hybrid events and save to database (fully reactive pipeline)
   pipelineSubscription = hybridStream.stream$
     .pipe(
       tap((event) => {
@@ -195,40 +249,22 @@ async function bootstrapHybridMode(): Promise<void> {
           'Received hybrid event'
         );
       }),
-      // Process events and generate snapshots
-      mergeMap(async (event: HybridEvent) => {
-        let snapshot: SnapshotData | null = null;
-
-        // Ensure trader state exists
-        const trader = await tradersRepo.findByAddress(event.address);
-        if (!trader) {
-          return null;
-        }
-        initializeTraderState(trader.id, event.address);
-
-        if (event.type === 'fill') {
-          snapshot = processHybridFill(event.address, event.data as WebSocketFill);
-        } else if (event.type === 'snapshot') {
-          snapshot = processHybridSnapshot(
-            event.address,
-            event.data as HyperliquidClearinghouseState
-          );
-        }
-
-        return snapshot;
-      }),
+      // Process events using Observable (not async/await)
+      mergeMap((event) => processHybridEvent$(event)),
       filter((snapshot): snapshot is SnapshotData => snapshot !== null),
       // Buffer and batch write
-      bufferTime(30000), // Buffer for 30 seconds
+      bufferTime(30000),
       filter((batch) => batch.length > 0),
-      mergeMap(async (batch) => {
-        try {
-          await saveSnapshots(batch);
-          logger.info({ count: batch.length }, 'Saved PnL snapshots (hybrid mode)');
-        } catch (err) {
-          logger.error({ error: (err as Error).message }, 'Failed to save snapshots');
-        }
-      }),
+      // Save using Observable (not async/await)
+      mergeMap((batch) =>
+        saveSnapshots$(batch).pipe(
+          tap(() => logger.info({ count: batch.length }, 'Saved PnL snapshots (hybrid mode)')),
+          catchError((err) => {
+            logger.error({ error: (err as Error).message }, 'Failed to save snapshots');
+            return EMPTY;
+          })
+        )
+      ),
       takeUntil(shutdown$),
       catchError((err) => {
         logger.error({ error: (err as Error).message }, 'Hybrid pipeline error');
@@ -244,12 +280,9 @@ async function bootstrapHybridMode(): Promise<void> {
   await discoveryStream.start();
   logger.info('Trader discovery started');
 
-  // Start auto-subscribe job (processes discovery queue every 60 seconds)
-  autoSubscribeInterval = startAutoSubscribeJob(60000);
-  logger.info('Auto-subscribe job started');
-
-  // Process discovery queue immediately
-  await processDiscoveryQueue();
+  // Start auto-subscribe job using RxJS interval (not setInterval)
+  autoSubscribeSubscription = createAutoSubscribeStream$().subscribe();
+  logger.info('Auto-subscribe job started (RxJS interval)');
 }
 
 /**
@@ -269,6 +302,10 @@ async function bootstrapLegacyMode(): Promise<void> {
   // Create the polling-based pipeline
   const getActiveTraders = () => tradersRepo.getActiveAddresses();
 
+  const saveSnapshots = async (snapshots: SnapshotData[]) => {
+    await firstValueFrom(saveSnapshots$(snapshots));
+  };
+
   const pipeline$ = createMainPipeline(getActiveTraders, saveSnapshots, shutdown$);
 
   pipelineSubscription = pipeline$.subscribe({
@@ -284,10 +321,13 @@ async function bootstrapLegacyMode(): Promise<void> {
  */
 async function bootstrap(): Promise<void> {
   logger.info('Starting PnL Indexer...');
-  logger.info({
-    mode: config.USE_HYBRID_MODE ? 'HYBRID' : 'LEGACY',
-    pollInterval: config.POLL_INTERVAL_MS,
-  }, 'Configuration');
+  logger.info(
+    {
+      mode: config.USE_HYBRID_MODE ? 'HYBRID' : 'LEGACY',
+      pollInterval: config.POLL_INTERVAL_MS,
+    },
+    'Configuration'
+  );
 
   // Connect to database
   const dbConnected = await db.checkConnection();
@@ -327,16 +367,16 @@ async function bootstrap(): Promise<void> {
     shutdown$.complete();
 
     // Wait for in-flight operations
-    await new Promise((resolve) => setTimeout(resolve, 5000));
+    await firstValueFrom(timer(5000));
 
     // Cleanup subscriptions
     if (pipelineSubscription) {
       pipelineSubscription.unsubscribe();
     }
 
-    // Stop auto-subscribe job
-    if (autoSubscribeInterval) {
-      clearInterval(autoSubscribeInterval);
+    // Stop auto-subscribe subscription
+    if (autoSubscribeSubscription) {
+      autoSubscribeSubscription.unsubscribe();
     }
 
     // Stop discovery

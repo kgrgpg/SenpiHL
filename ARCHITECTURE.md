@@ -54,6 +54,35 @@
 - Elegant WebSocket integration via `webSocket()`
 - Testable with marble diagrams
 
+**RxJS Pattern Standards (v1.1.1+)**
+
+All code uses consistent RxJS patterns:
+
+| Pattern | Usage |
+|---------|-------|
+| `from(promise)` | Wrap Promises in `mergeMap`/`concatMap` |
+| `interval()` | Use instead of `setInterval` |
+| `timer()` | Use instead of `setTimeout` |
+| `concatMap` + `delay` | Sequential processing with delays |
+| `forkJoin` | Parallel async operations |
+| Subscription tracking | Store subscriptions for cleanup |
+
+```typescript
+// ✅ Correct: Observable-based
+mergeMap((event) =>
+  from(tradersRepo.findByAddress(event.address)).pipe(
+    map((trader) => processEvent(trader, event)),
+    catchError((err) => EMPTY)
+  )
+)
+
+// ❌ Avoid: async/await in mergeMap
+mergeMap(async (event) => {
+  const trader = await tradersRepo.findByAddress(event.address);
+  return processEvent(trader, event);
+})
+```
+
 **Why TimescaleDB over MongoDB/ClickHouse?**
 - **vs MongoDB**: Native time-series partitioning (hypertables), SQL joins, continuous aggregates that auto-update
 - **vs ClickHouse**: Better for mixed read/write workloads, simpler operational model, PostgreSQL ecosystem

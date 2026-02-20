@@ -4,6 +4,63 @@ All notable changes to the PnL Indexer project.
 
 ---
 
+## [1.1.1] - 2026-02-20
+
+### 🔄 RxJS Pattern Consistency Refactor
+
+Refactored the entire codebase to use consistent RxJS patterns, replacing mixed async/await and Promise patterns with proper Observable chains.
+
+---
+
+### Key Changes
+
+#### Replaced Promise patterns with RxJS
+
+| Before | After |
+|--------|-------|
+| `async/await` in `mergeMap` | `mergeMap(() => from(promise))` |
+| `Promise.then()` | `from().pipe(tap(), catchError())` |
+| `setInterval` | `interval().pipe(...)` |
+| `setTimeout` | `timer()` |
+| `for await` loops | `from(array).pipe(concatMap(...))` |
+| Fire-and-forget subscriptions | Tracked subscriptions with cleanup |
+| `tap(async () => {})` | `mergeMap(() => from(promise))` |
+
+#### Auto-Subscribe Job (RxJS-based)
+
+Converted to fully Observable-based:
+
+- `processDiscoveryQueue$()` - returns Observable
+- Uses `concatMap` with `delay` instead of `for` loop
+- Uses `reduce` operator to aggregate stats
+- `interval` stream replaces `setInterval`
+
+#### Hybrid Stream Improvements
+
+- **Subscription lifecycle**: Tracks fill subscriptions for proper cleanup
+- `fetchSnapshot$()` returns Observable (not fire-and-forget)
+- `unsubscribeTrader()` properly cleans up stored subscriptions
+- `disconnect()` cleans up all subscriptions
+
+#### Backfill Job (forkJoin)
+
+- Uses `forkJoin` for parallel fills + funding fetch
+- Replaced sequential `await` with `concatMap` chain
+- Progress updates use proper Observable patterns
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `src/index.ts` | RxJS timer, Observable-based auto-subscribe |
+| `src/jobs/auto-subscribe.ts` | Full Observable conversion |
+| `src/jobs/backfill.ts` | forkJoin, concatMap patterns |
+| `src/streams/index.ts` | from() wrapper for saveSnapshots |
+| `src/streams/sources/hybrid.stream.ts` | Subscription tracking, cleanup |
+| `src/streams/sources/trader-discovery.stream.ts` | Observable polling, queueing |
+
+---
+
 ## [1.1.0] - 2026-02-20
 
 ### 🚀 Full Integration Release

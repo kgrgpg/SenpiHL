@@ -1,4 +1,11 @@
-import { Observable, merge, Subject, EMPTY } from 'rxjs';
+/**
+ * Legacy Polling Pipeline (for USE_HYBRID_MODE=false)
+ *
+ * Uses RxJS patterns consistently throughout.
+ * Polls positions, fills, and funding for active traders.
+ */
+
+import { Observable, merge, Subject, EMPTY, from, of } from 'rxjs';
 import {
   map,
   bufferTime,
@@ -59,7 +66,7 @@ function processPositionUpdate(update: PositionUpdate): SnapshotData | null {
     return null;
   }
 
-  const positions = update.state.assetPositions.map(ap => {
+  const positions = update.state.assetPositions.map((ap) => {
     const pos = ap.position;
     return parsePositionFromApi(
       pos.coin,
@@ -124,6 +131,10 @@ function processFundingUpdate(update: FundingUpdate): SnapshotData | null {
   return createSnapshot(state);
 }
 
+/**
+ * Create the main polling pipeline (legacy mode)
+ * Uses Observable-based saveSnapshots for consistency
+ */
 export function createMainPipeline(
   getActiveTraders: () => Promise<string[]>,
   saveSnapshots: (snapshots: SnapshotData[]) => Promise<void>,
@@ -134,21 +145,21 @@ export function createMainPipeline(
   const funding$ = createFundingStream(getActiveTraders);
 
   const positionEvents$ = positions$.pipe(
-    map(data => ({ type: 'positions' as const, data, timestamp: new Date() }))
+    map((data) => ({ type: 'positions' as const, data, timestamp: new Date() }))
   );
 
   const fillEvents$ = fills$.pipe(
-    map(data => ({ type: 'fills' as const, data, timestamp: new Date() }))
+    map((data) => ({ type: 'fills' as const, data, timestamp: new Date() }))
   );
 
   const fundingEvents$ = funding$.pipe(
-    map(data => ({ type: 'funding' as const, data, timestamp: new Date() }))
+    map((data) => ({ type: 'funding' as const, data, timestamp: new Date() }))
   );
 
   const dataEvents$ = merge(positionEvents$, fillEvents$, fundingEvents$);
 
   const snapshots$ = dataEvents$.pipe(
-    mergeMap(event => {
+    mergeMap((event) => {
       const snapshots: SnapshotData[] = [];
 
       if (event.type === 'positions') {
@@ -168,22 +179,23 @@ export function createMainPipeline(
         }
       }
 
-      return snapshots.length > 0 ? [snapshots] : EMPTY;
+      return snapshots.length > 0 ? of(snapshots) : EMPTY;
     }),
     bufferTime(60000),
-    filter(batches => batches.flat().length > 0),
-    map(batches => batches.flat()),
+    filter((batches) => batches.flat().length > 0),
+    map((batches) => batches.flat()),
     withMetrics('snapshots'),
-    mergeMap(snapshots => {
-      return saveSnapshots(snapshots)
-        .then(() => {
-          logger.info({ count: snapshots.length }, 'Saved PnL snapshots');
-        })
-        .catch(error => {
+    // Use from() wrapper instead of Promise.then()
+    mergeMap((snapshots) =>
+      from(saveSnapshots(snapshots)).pipe(
+        tap(() => logger.info({ count: snapshots.length }, 'Saved PnL snapshots')),
+        catchError((error) => {
           logger.error({ error: error.message }, 'Failed to save snapshots');
-        });
-    }),
-    catchError(error => {
+          return EMPTY;
+        })
+      )
+    ),
+    catchError((error) => {
       logger.error({ error: error.message }, 'Pipeline error');
       return EMPTY;
     }),

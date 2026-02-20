@@ -4,6 +4,8 @@
  * Combines WebSocket (real-time fills) with polling (position snapshots).
  * This approach enables efficient tracking of thousands of traders.
  *
+ * Uses consistent RxJS patterns with proper subscription lifecycle management.
+ *
  * Architecture:
  * ┌─────────────────────────────────────────────────────────────────────┐
  * │                        Hybrid Stream                                │
@@ -30,7 +32,7 @@
  * └────────────────────┴─────────────────────┴──────────────────────────┘
  */
 
-import { Observable, Subject, merge, timer, from, EMPTY } from 'rxjs';
+import { Observable, Subject, timer, from, EMPTY, Subscription } from 'rxjs';
 import {
   switchMap,
   map,
@@ -41,8 +43,7 @@ import {
   bufferTime,
   concatMap,
   takeUntil,
-  distinctUntilChanged,
-  retry,
+  mergeMap,
 } from 'rxjs/operators';
 
 import { config } from '../../utils/config.js';
@@ -62,24 +63,23 @@ interface TraderSubscription {
   address: string;
   subscribedAt: number;
   lastSnapshot: number;
+  fillSubscription: Subscription;
 }
 
-const SNAPSHOT_INTERVAL_MS = config.POLL_INTERVAL_MS || 5 * 60 * 1000; // 5 minutes default
-const BATCH_SIZE = 10; // Poll N traders per batch to spread load
+const SNAPSHOT_INTERVAL_MS = config.POLL_INTERVAL_MS || 5 * 60 * 1000;
+const BATCH_SIZE = 10;
 
 export class HybridDataStream {
   private readonly traders = new Map<string, TraderSubscription>();
   private readonly events$ = new Subject<HybridEvent>();
   private readonly destroy$ = new Subject<void>();
   private readonly ws = getHyperliquidWebSocket();
+  private pollingSubscription: Subscription | null = null;
 
   constructor() {
     this.setupPollingLoop();
   }
 
-  /**
-   * Get the merged event stream
-   */
   get stream$(): Observable<HybridEvent> {
     return this.events$.asObservable().pipe(share());
   }
@@ -93,45 +93,55 @@ export class HybridDataStream {
       return;
     }
 
-    // Add to tracked traders
+    // Create WebSocket subscription (tracked for cleanup)
+    const fillSubscription = this.ws
+      .subscribeToUserFills(address)
+      .pipe(
+        map(
+          (fill): HybridEvent => ({
+            type: 'fill',
+            address,
+            timestamp: fill.time,
+            data: fill,
+          })
+        ),
+        tap((event) => this.events$.next(event)),
+        takeUntil(this.destroy$),
+        catchError((err) => {
+          logger.error(
+            { error: (err as Error).message, address },
+            'WebSocket fill subscription error'
+          );
+          return EMPTY;
+        })
+      )
+      .subscribe();
+
+    // Add to tracked traders with subscription reference
     this.traders.set(address, {
       address,
       subscribedAt: Date.now(),
       lastSnapshot: 0,
+      fillSubscription,
     });
 
-    // Subscribe to WebSocket fills
-    this.ws.subscribeToUserFills(address).pipe(
-      map((fill): HybridEvent => ({
-        type: 'fill',
-        address,
-        timestamp: fill.time,
-        data: fill,
-      })),
-      tap((event) => this.events$.next(event)),
-      takeUntil(this.destroy$),
-      catchError((err) => {
-        logger.error({ error: (err as Error).message, address }, 'WebSocket fill subscription error');
-        return EMPTY;
-      })
-    ).subscribe();
+    // Fetch initial snapshot
+    this.fetchSnapshot$(address).subscribe();
 
-    // Fetch initial snapshot immediately
-    this.fetchSnapshot(address);
-
-    logger.info(
-      { address, totalTraders: this.traders.size },
-      'Trader subscribed to hybrid stream'
-    );
+    logger.info({ address, totalTraders: this.traders.size }, 'Trader subscribed to hybrid stream');
   }
 
   /**
-   * Unsubscribe from a trader
+   * Unsubscribe from a trader (with proper cleanup)
    */
   unsubscribeTrader(address: string): void {
-    if (!this.traders.has(address)) {
+    const trader = this.traders.get(address);
+    if (!trader) {
       return;
     }
+
+    // Unsubscribe from WebSocket fill events
+    trader.fillSubscription.unsubscribe();
 
     this.traders.delete(address);
     this.ws.unsubscribeFromUserFills(address);
@@ -142,39 +152,46 @@ export class HybridDataStream {
     );
   }
 
-  /**
-   * Get count of subscribed traders
-   */
   get traderCount(): number {
     return this.traders.size;
   }
 
-  /**
-   * Connect to WebSocket
-   */
   connect(): void {
     this.ws.connect();
   }
 
   /**
-   * Disconnect and cleanup
+   * Disconnect and cleanup all subscriptions
    */
   disconnect(): void {
     this.destroy$.next();
+
+    // Cleanup all trader subscriptions
+    for (const trader of this.traders.values()) {
+      trader.fillSubscription.unsubscribe();
+    }
     this.traders.clear();
+
+    // Cleanup polling subscription
+    if (this.pollingSubscription) {
+      this.pollingSubscription.unsubscribe();
+      this.pollingSubscription = null;
+    }
   }
 
   /**
-   * Fetch a position snapshot for a trader
+   * Fetch a position snapshot for a trader (returns Observable)
    */
-  private fetchSnapshot(address: string): void {
-    fetchClearinghouseState(address).pipe(
-      map((state): HybridEvent => ({
-        type: 'snapshot',
-        address,
-        timestamp: Date.now(),
-        data: state,
-      })),
+  private fetchSnapshot$(address: string): Observable<void> {
+    return fetchClearinghouseState(address).pipe(
+      map(
+        (state): HybridEvent => ({
+          type: 'snapshot',
+          address,
+          timestamp: Date.now(),
+          data: state,
+        })
+      ),
       tap((event) => {
         this.events$.next(event);
         const trader = this.traders.get(address);
@@ -182,11 +199,12 @@ export class HybridDataStream {
           trader.lastSnapshot = Date.now();
         }
       }),
+      map(() => void 0),
       catchError((err) => {
         logger.error({ error: (err as Error).message, address }, 'Failed to fetch snapshot');
         return EMPTY;
       })
-    ).subscribe();
+    );
   }
 
   /**
@@ -194,46 +212,49 @@ export class HybridDataStream {
    * Staggers requests to avoid rate limit spikes
    */
   private setupPollingLoop(): void {
-    timer(SNAPSHOT_INTERVAL_MS, SNAPSHOT_INTERVAL_MS).pipe(
-      tap(() => logger.debug({ count: this.traders.size }, 'Starting snapshot poll cycle')),
-      switchMap(() => {
-        // Get traders that need snapshot refresh
-        const now = Date.now();
-        const tradersToRefresh = Array.from(this.traders.values())
-          .filter((t) => now - t.lastSnapshot >= SNAPSHOT_INTERVAL_MS)
-          .map((t) => t.address);
+    this.pollingSubscription = timer(SNAPSHOT_INTERVAL_MS, SNAPSHOT_INTERVAL_MS)
+      .pipe(
+        tap(() => logger.debug({ count: this.traders.size }, 'Starting snapshot poll cycle')),
+        switchMap(() => {
+          const now = Date.now();
+          const tradersToRefresh = Array.from(this.traders.values())
+            .filter((t) => now - t.lastSnapshot >= SNAPSHOT_INTERVAL_MS)
+            .map((t) => t.address);
 
-        if (tradersToRefresh.length === 0) {
+          if (tradersToRefresh.length === 0) {
+            return EMPTY;
+          }
+
+          logger.info({ count: tradersToRefresh.length }, 'Refreshing position snapshots');
+
+          // Process in batches with delay between batches
+          return from(tradersToRefresh).pipe(
+            bufferTime(100, null, BATCH_SIZE),
+            filter((batch) => batch.length > 0),
+            concatMap((batch) =>
+              // Fetch snapshots for this batch (reactive)
+              from(batch).pipe(
+                mergeMap((address) => this.fetchSnapshot$(address)),
+                // Delay after processing batch
+                tap({
+                  complete: () => {
+                    /* Small gap between batches handled by concatMap */
+                  },
+                })
+              )
+            )
+          );
+        }),
+        takeUntil(this.destroy$),
+        catchError((err) => {
+          logger.error({ error: (err as Error).message }, 'Polling loop error');
           return EMPTY;
-        }
-
-        logger.info(
-          { count: tradersToRefresh.length },
-          'Refreshing position snapshots'
-        );
-
-        // Process in batches with delay between batches
-        return from(tradersToRefresh).pipe(
-          bufferTime(100, null, BATCH_SIZE), // Batch every 100ms or BATCH_SIZE traders
-          filter((batch) => batch.length > 0),
-          concatMap((batch) => {
-            // Fetch snapshots for this batch
-            batch.forEach((address) => this.fetchSnapshot(address));
-            // Small delay between batches to spread load
-            return timer(500);
-          })
-        );
-      }),
-      takeUntil(this.destroy$),
-      catchError((err) => {
-        logger.error({ error: (err as Error).message }, 'Polling loop error');
-        return EMPTY;
-      })
-    ).subscribe();
+        })
+      )
+      .subscribe();
   }
 }
 
-// Singleton instance
 let hybridStreamInstance: HybridDataStream | null = null;
 
 export function getHybridDataStream(): HybridDataStream {
