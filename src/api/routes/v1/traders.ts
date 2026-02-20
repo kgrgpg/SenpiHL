@@ -50,14 +50,19 @@ export async function tradersRoutes(fastify: FastifyInstance): Promise<void> {
     const fromDate = from ? new Date(parseInt(from) * 1000) : new Date(now - days * 24 * 60 * 60 * 1000);
     const toDate = to ? new Date(parseInt(to) * 1000) : new Date(now);
 
-    const autoGranularity = granularity ?? (days > 7 ? 'daily' : days > 1 ? 'hourly' : 'raw');
+    const preferredGranularity = granularity ?? (days > 7 ? 'daily' : days > 1 ? 'hourly' : 'raw');
 
-    const snapshots = await snapshotsRepo.getForTrader(
+    // Try preferred granularity first, fall back to raw if aggregate is empty
+    let snapshots = await snapshotsRepo.getForTrader(
       trader.id,
       fromDate,
       toDate,
-      autoGranularity
+      preferredGranularity
     );
+
+    if (snapshots.length === 0 && preferredGranularity !== 'raw') {
+      snapshots = await snapshotsRepo.getForTrader(trader.id, fromDate, toDate, 'raw');
+    }
 
     const summary = await snapshotsRepo.getSummary(trader.id, fromDate, toDate);
     const latestSnapshot = snapshots[snapshots.length - 1];
