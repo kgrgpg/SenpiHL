@@ -88,7 +88,7 @@ describe('Auto-Subscribe Job', () => {
       expect(result.skipped).toBe(0);
       expect(initializeTraderState).toHaveBeenCalledWith(42, '0xnewtrader');
       expect(getHybridDataStream().subscribeTrader).toHaveBeenCalledWith('0xnewtrader');
-      expect(scheduleBackfill).toHaveBeenCalledWith('0xnewtrader', 7);
+      expect(scheduleBackfill).toHaveBeenCalledWith('0xnewtrader', 30);
     });
 
     it('should skip already-subscribed traders', async () => {

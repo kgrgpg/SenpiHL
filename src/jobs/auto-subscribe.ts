@@ -33,7 +33,7 @@ import { scheduleBackfill } from './backfill.js';
 
 const MAX_SUBSCRIPTIONS_PER_RUN = 10;
 const MIN_PRIORITY = 0;
-const AUTO_BACKFILL_DAYS = 7; // Shorter backfill for auto-discovered traders
+const AUTO_BACKFILL_DAYS = 30;
 
 interface QueuedTrader {
   id: number;
