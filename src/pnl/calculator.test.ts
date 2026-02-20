@@ -15,6 +15,7 @@ import {
   parseTradeFromApi,
   parseFundingFromApi,
   parsePositionFromApi,
+  isPositionFlip,
 } from './calculator.js';
 import type { TradeData, FundingData, PositionData } from './types.js';
 
@@ -743,6 +744,136 @@ describe('PnL Calculator', () => {
         expect(position.size.toString()).toBe('-1.5');
         expect(position.unrealizedPnl.toString()).toBe('-500');
       });
+
+      it('should parse margin type', () => {
+        const cross = parsePositionFromApi('BTC', '1', '50000', '0', 10, null, '5000', 'cross');
+        expect(cross.marginType).toBe('cross');
+
+        const isolated = parsePositionFromApi('ETH', '1', '3000', '0', 5, null, '600', 'isolated');
+        expect(isolated.marginType).toBe('isolated');
+      });
+
+      it('should default margin type to cross', () => {
+        const position = parsePositionFromApi('BTC', '1', '50000', '0', 10, null, '5000');
+        expect(position.marginType).toBe('cross');
+      });
+    });
+  });
+
+  describe('Liquidation handling', () => {
+    it('should track liquidation count', () => {
+      const state = createInitialState(1, '0xLiquidated');
+
+      const liqTrade = parseTradeFromApi(
+        'BTC', 'A', '1', '50000', '-5000', '50', 1700000000000, 1, true
+      );
+      const updated = applyTrade(state, liqTrade);
+
+      expect(updated.liquidationCount).toBe(1);
+      expect(updated.realizedTradingPnl.toString()).toBe('-5000');
+    });
+
+    it('should not count non-liquidation trades', () => {
+      const state = createInitialState(1, '0xNormal');
+
+      const trade = parseTradeFromApi(
+        'BTC', 'B', '1', '50000', '0', '5', 1700000000000, 1, false
+      );
+      const updated = applyTrade(state, trade);
+
+      expect(updated.liquidationCount).toBe(0);
+    });
+
+    it('should accumulate multiple liquidations', () => {
+      let state = createInitialState(1, '0xMultiLiq');
+
+      for (let i = 0; i < 3; i++) {
+        const liq = parseTradeFromApi(
+          'ETH', 'A', '10', '3000', '-1000', '30', 1700000000000 + i * 1000, i, true
+        );
+        state = applyTrade(state, liq);
+      }
+
+      expect(state.liquidationCount).toBe(3);
+      expect(state.realizedTradingPnl.toString()).toBe('-3000');
+    });
+
+    it('should parse isLiquidation flag from API', () => {
+      const liqTrade = parseTradeFromApi(
+        'BTC', 'A', '1', '40000', '-10000', '100', 1700000000000, 1, true
+      );
+      expect(liqTrade.isLiquidation).toBe(true);
+
+      const normalTrade = parseTradeFromApi(
+        'BTC', 'B', '1', '50000', '0', '5', 1700000000000, 2, false
+      );
+      expect(normalTrade.isLiquidation).toBe(false);
+    });
+  });
+
+  describe('Position flip detection', () => {
+    it('should detect long-to-short flip', () => {
+      const trade = parseTradeFromApi(
+        'BTC', 'A', '2', '50000', '500', '5', 1700000000000, 1,
+        false, 'Close Long', '1.0'
+      );
+      // Was long 1.0, selling 2.0 = flip to short 1.0
+      expect(isPositionFlip(trade)).toBe(true);
+    });
+
+    it('should detect short-to-long flip', () => {
+      const trade = parseTradeFromApi(
+        'BTC', 'B', '3', '50000', '-200', '5', 1700000000000, 1,
+        false, 'Close Short', '-2.0'
+      );
+      // Was short 2.0, buying 3.0 = flip to long 1.0
+      expect(isPositionFlip(trade)).toBe(true);
+    });
+
+    it('should not flag partial close as flip', () => {
+      const trade = parseTradeFromApi(
+        'BTC', 'A', '0.5', '50000', '100', '5', 1700000000000, 1,
+        false, 'Close Long', '1.0'
+      );
+      // Was long 1.0, selling 0.5 = still long 0.5 (no flip)
+      expect(isPositionFlip(trade)).toBe(false);
+    });
+
+    it('should not flag full close as flip', () => {
+      const trade = parseTradeFromApi(
+        'BTC', 'A', '1', '50000', '500', '5', 1700000000000, 1,
+        false, 'Close Long', '1.0'
+      );
+      // Was long 1.0, selling 1.0 = flat (not a flip, just closed)
+      expect(isPositionFlip(trade)).toBe(false);
+    });
+
+    it('should not flag open from flat as flip', () => {
+      const trade = parseTradeFromApi(
+        'BTC', 'B', '1', '50000', '0', '5', 1700000000000, 1,
+        false, 'Open Long', '0'
+      );
+      // Was flat, buying = new position (not a flip)
+      expect(isPositionFlip(trade)).toBe(false);
+    });
+
+    it('should handle missing startPosition/direction gracefully', () => {
+      const trade = parseTradeFromApi(
+        'BTC', 'B', '1', '50000', '0', '5', 1700000000000, 1, false
+      );
+      expect(isPositionFlip(trade)).toBe(false);
+    });
+
+    it('should track flip count in state', () => {
+      let state = createInitialState(1, '0xFlipper');
+
+      const flipTrade = parseTradeFromApi(
+        'BTC', 'A', '2', '50000', '500', '5', 1700000000000, 1,
+        false, 'Close Long', '1.0'
+      );
+      state = applyTrade(state, flipTrade);
+
+      expect(state.flipCount).toBe(1);
     });
   });
 });

@@ -9,7 +9,17 @@ vi.mock('../../../storage/db/repositories/index.js', () => ({
   },
 }));
 
+vi.mock('../../../storage/cache/redis.js', () => ({
+  cacheGet: vi.fn().mockResolvedValue(null),
+  cacheSet: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../../../utils/logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+}));
+
 import { leaderboardRepo } from '../../../storage/db/repositories/index.js';
+import { cacheGet, cacheSet } from '../../../storage/cache/redis.js';
 
 describe('Leaderboard Routes', () => {
   let app: ReturnType<typeof Fastify>;
@@ -168,6 +178,59 @@ describe('Leaderboard Routes', () => {
       expect(body.timeframe).toBe('1d');
       expect(body.metric).toBe('realized_pnl');
       expect(leaderboardRepo.get).toHaveBeenCalledWith('1d', 'realized_pnl', 20);
+    });
+
+    it('should return cached data on cache hit', async () => {
+      const cachedData = {
+        timeframe: '7d',
+        metric: 'total_pnl',
+        data: [{ rank: 1, address: '0xCached' }],
+        updated_at: 12345,
+      };
+      vi.mocked(cacheGet).mockResolvedValue(cachedData);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/leaderboard',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.cached).toBe(true);
+      expect(body.data[0].address).toBe('0xCached');
+      expect(leaderboardRepo.get).not.toHaveBeenCalled();
+    });
+
+    it('should write to cache on cache miss', async () => {
+      vi.mocked(cacheGet).mockResolvedValue(null);
+      vi.mocked(leaderboardRepo.get).mockResolvedValue([]);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/leaderboard',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.cached).toBe(false);
+      expect(cacheSet).toHaveBeenCalledWith(
+        'leaderboard:7d:total_pnl:50',
+        expect.objectContaining({ timeframe: '7d' }),
+        60
+      );
+    });
+
+    it('should fall through to DB if cache read fails', async () => {
+      vi.mocked(cacheGet).mockRejectedValue(new Error('Redis down'));
+      vi.mocked(leaderboardRepo.get).mockResolvedValue([]);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/leaderboard',
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(leaderboardRepo.get).toHaveBeenCalled();
     });
   });
 });

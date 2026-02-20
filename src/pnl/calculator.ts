@@ -19,12 +19,34 @@ export function createInitialState(traderId: number, address: string): PnLStateD
     positions: new Map(),
     totalVolume: new Decimal(0),
     tradeCount: 0,
+    liquidationCount: 0,
+    flipCount: 0,
     lastUpdated: new Date(),
   };
 }
 
+/**
+ * Detect if a trade is a position flip (long→short or short→long).
+ * Hyperliquid fills include `direction` like "Open Long", "Close Short", etc.
+ * and `startPosition` (signed size before this fill).
+ */
+export function isPositionFlip(trade: TradeData): boolean {
+  if (!trade.startPosition || !trade.direction) return false;
+  const startPos = new Decimal(trade.startPosition);
+  if (startPos.isZero()) return false;
+
+  // Flip = trade crossed zero (was long, now short or vice versa)
+  const wasLong = startPos.isPositive();
+  const isBuy = trade.side === 'B';
+  // If was long and selling more than position size, or was short and buying more than position size
+  if (wasLong && !isBuy && trade.size.greaterThan(startPos.abs())) return true;
+  if (!wasLong && isBuy && trade.size.greaterThan(startPos.abs())) return true;
+  return false;
+}
+
 export function applyTrade(state: PnLStateData, trade: TradeData): PnLStateData {
   const tradeVolume = trade.size.times(trade.price);
+  const flip = isPositionFlip(trade);
 
   return {
     ...state,
@@ -32,6 +54,8 @@ export function applyTrade(state: PnLStateData, trade: TradeData): PnLStateData 
     totalFees: state.totalFees.plus(trade.fee),
     totalVolume: state.totalVolume.plus(tradeVolume),
     tradeCount: state.tradeCount + 1,
+    liquidationCount: state.liquidationCount + (trade.isLiquidation ? 1 : 0),
+    flipCount: state.flipCount + (flip ? 1 : 0),
     lastUpdated: trade.timestamp,
   };
 }
@@ -138,7 +162,8 @@ export function parsePositionFromApi(
   unrealizedPnl: string,
   leverage: number,
   liquidationPx: string | null,
-  marginUsed: string
+  marginUsed: string,
+  marginType: 'cross' | 'isolated' = 'cross'
 ): PositionData {
   return {
     coin,
@@ -148,6 +173,7 @@ export function parsePositionFromApi(
     leverage,
     liquidationPrice: liquidationPx ? toDecimal(liquidationPx) : null,
     marginUsed: toDecimal(marginUsed),
+    marginType,
   };
 }
 
@@ -159,7 +185,10 @@ export function parseTradeFromApi(
   closedPnl: string,
   fee: string,
   time: number,
-  tid: number
+  tid: number,
+  isLiquidation: boolean = false,
+  direction?: string,
+  startPosition?: string
 ): TradeData {
   return {
     coin,
@@ -170,6 +199,9 @@ export function parseTradeFromApi(
     fee: toDecimal(fee),
     timestamp: new Date(time),
     tid,
+    isLiquidation,
+    direction,
+    startPosition,
   };
 }
 

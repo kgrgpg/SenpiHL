@@ -49,6 +49,7 @@ export interface WebSocketFill {
   fee: string;
   tid: number;
   feeToken: string;
+  liquidation?: boolean;
 }
 
 export interface WebSocketUserEvent {

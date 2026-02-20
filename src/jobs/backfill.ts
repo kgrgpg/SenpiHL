@@ -7,7 +7,7 @@
 
 import { Queue, Worker, Job } from 'bullmq';
 import { firstValueFrom, from, forkJoin, of, Observable } from 'rxjs';
-import { mergeMap, tap, map, catchError, concatMap, reduce, delay } from 'rxjs/operators';
+import { mergeMap, map, catchError, delay, mergeScan, reduce } from 'rxjs/operators';
 
 import { fetchUserFills, fetchUserFunding } from '../hyperliquid/client.js';
 import {
@@ -83,7 +83,10 @@ function processChunk$(
           fill.closedPnl,
           fill.fee,
           fill.time,
-          fill.tid
+          fill.tid,
+          fill.liquidation ?? false,
+          fill.dir,
+          fill.startPosition
         );
         state = applyTrade(state, trade);
         fillCount++;
@@ -158,43 +161,44 @@ async function processBackfillJob(job: Job<BackfillJobData>): Promise<void> {
 
   const initialState = createInitialState(traderId, address);
 
-  // Process all chunks using RxJS
+  // Process chunks sequentially, chaining state via mergeScan (concurrency 1)
+  // Each chunk receives the previous chunk's output state as its input
   const result = await firstValueFrom(
     from(dayChunks).pipe(
-      concatMap((chunk, index) =>
-        of(chunk).pipe(
-          // Process this chunk
-          mergeMap((c) =>
-            // Use initial state for first chunk, otherwise we need to chain
-            processChunk$(address, c, initialState)
+      mergeScan(
+        (acc, chunk, index) =>
+          processChunk$(address, chunk, acc.state).pipe(
+            mergeMap((chunkResult) =>
+              saveSnapshot$(traderId, chunkResult.state, new Date(chunk.end)).pipe(
+                map(() => chunkResult)
+              )
+            ),
+            mergeMap((chunkResult) =>
+              from(
+                job.updateProgress({
+                  percent: Math.round(((index + 1) / dayChunks.length) * 100),
+                  fills: chunkResult.fills,
+                  funding: chunkResult.funding,
+                  snapshots: index + 1,
+                })
+              ).pipe(map(() => chunkResult))
+            ),
+            delay(1000),
+            map((chunkResult) => ({
+              state: chunkResult.state,
+              fills: acc.fills + chunkResult.fills,
+              funding: acc.funding + chunkResult.funding,
+              snapshots: acc.snapshots + 1,
+            }))
           ),
-          // Save snapshot for this chunk
-          mergeMap((chunkResult) =>
-            saveSnapshot$(traderId, chunkResult.state, new Date(chunk.end)).pipe(
-              map(() => chunkResult)
-            )
-          ),
-          // Update job progress (use mergeMap to handle Promise properly)
-          mergeMap((chunkResult) =>
-            from(
-              job.updateProgress({
-                percent: Math.round(((index + 1) / dayChunks.length) * 100),
-                fills: chunkResult.fills,
-                funding: chunkResult.funding,
-                snapshots: index + 1,
-              })
-            ).pipe(map(() => chunkResult))
-          ),
-          // Rate limiting delay
-          delay(1000)
-        )
+        { state: initialState, fills: 0, funding: 0, snapshots: 0 },
+        1 // concurrency 1 = sequential, ensures state chains correctly
       ),
-      // Aggregate final stats
       reduce(
-        (acc, result) => ({
-          fills: acc.fills + result.fills,
-          funding: acc.funding + result.funding,
-          snapshots: acc.snapshots + 1,
+        (_, acc) => ({
+          fills: acc.fills,
+          funding: acc.funding,
+          snapshots: acc.snapshots,
         }),
         { fills: 0, funding: 0, snapshots: 0 }
       )

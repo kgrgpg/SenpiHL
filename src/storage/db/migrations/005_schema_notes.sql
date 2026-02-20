@@ -1,0 +1,22 @@
+-- Schema usage documentation (no-op migration)
+--
+-- ACTIVELY USED TABLES:
+--   traders              - Tracked trader addresses
+--   pnl_snapshots        - Point-in-time PnL snapshots (hypertable)
+--   trader_discovery_queue - Pending traders to subscribe
+--   pnl_hourly           - Hourly continuous aggregate
+--   pnl_daily            - Daily continuous aggregate
+--   schema_migrations    - Migration tracking
+--
+-- RESERVED FOR FUTURE USE (schema exists, no writes):
+--   trades               - Individual trade records (for per-trade analytics)
+--   funding_payments     - Funding payment records (for per-event analytics)
+--   data_gaps            - Data completeness tracking
+--
+-- UNUSED COLUMNS ON traders TABLE (added in 004):
+--   data_start_date, backfill_complete_until, last_snapshot_at,
+--   last_fill_at, total_fills_count, total_snapshots_count,
+--   discovery_source - Reserved for future data completeness tracking
+--
+-- No SQL to execute in this migration.
+SELECT 1;

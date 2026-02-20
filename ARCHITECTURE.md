@@ -2129,10 +2129,10 @@ jobs:
 
 | Task | Description | Status |
 |------|-------------|--------|
-| Leaderboard | `/leaderboard` with Redis ZSET | ✅ Done |
+| Leaderboard | `/leaderboard` with delta PnL ranking | ✅ Done |
 | Delta PnL | Change calculations between snapshots | ✅ Done |
-| Backfill | BullMQ job for historical data | ✅ Done |
-| Caching | Redis cache layer with TTL | ✅ Done |
+| Backfill | BullMQ job for historical data (state-chained) | ✅ Done |
+| Caching | Redis cache layer with per-timeframe TTL | ✅ Done |
 
 ### Phase 3: Production Enhancements ✅ COMPLETE
 

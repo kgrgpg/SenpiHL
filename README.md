@@ -110,6 +110,8 @@ docker compose run --rm migrations
 | `/v1/traders/:address/positions` | GET | Get current positions |
 | `/v1/traders/:address/subscribe` | POST | Start tracking a trader |
 | `/v1/traders/:address/unsubscribe` | DELETE | Stop tracking a trader |
+| `/v1/traders/:address/backfill` | GET | Get backfill status for a trader |
+| `/v1/traders/:address/backfill` | POST | Manually trigger backfill (body: `{ "days": 30 }`) |
 
 #### Query Parameters for `/v1/traders/:address/pnl`
 

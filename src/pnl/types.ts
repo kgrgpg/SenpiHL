@@ -9,6 +9,8 @@ export interface PnLStateData {
   positions: Map<string, PositionData>;
   totalVolume: Decimal;
   tradeCount: number;
+  liquidationCount: number;
+  flipCount: number;
   lastUpdated: Date;
 }
 
@@ -20,6 +22,7 @@ export interface PositionData {
   leverage: number;
   liquidationPrice: Decimal | null;
   marginUsed: Decimal;
+  marginType: 'cross' | 'isolated';
 }
 
 export interface TradeData {
@@ -31,6 +34,9 @@ export interface TradeData {
   fee: Decimal;
   timestamp: Date;
   tid: number;
+  isLiquidation: boolean;
+  direction?: string;
+  startPosition?: string;
 }
 
 export interface FundingData {

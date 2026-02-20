@@ -97,7 +97,10 @@ function processHybridFill(address: string, fill: WebSocketFill): SnapshotData |
     fill.closedPnl,
     fill.fee,
     fill.time,
-    fill.tid
+    fill.tid,
+    fill.liquidation ?? false,
+    fill.dir,
+    fill.startPosition
   );
 
   state = applyTrade(state, trade);
@@ -127,7 +130,8 @@ function processHybridSnapshot(
       pos.unrealizedPnl,
       pos.leverage.value,
       pos.liquidationPx,
-      pos.marginUsed
+      pos.marginUsed,
+      pos.leverage.type
     );
   });
 
