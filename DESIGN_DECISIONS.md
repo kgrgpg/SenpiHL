@@ -377,7 +377,7 @@ External API dependencies require multiple layers of protection:
 | Topic | Decision | Key Reasoning |
 |-------|----------|---------------|
 | Message Queue | RxJS (no Kafka) | <100 TPS, single service, external API is bottleneck |
-| Trader Tracking | TBD | Depends on scale requirements |
+| Trader Tracking | On-demand | Start with explicit registration, add discovery later |
 | Database | TimescaleDB | Hypertables, continuous aggregates, compression |
 | Data Ingestion | Hybrid (WS + polling) | Real-time events + consistent state |
 | PnL Calculation | Incremental updates | O(1) performance, handle edge cases |
@@ -387,13 +387,216 @@ External API dependencies require multiple layers of protection:
 
 ---
 
+## 9. Production Enhancements (Time Permitting)
+
+Beyond the core requirements and bonus features, the following enhancements would elevate this to a production-grade system. These are prioritized by impact and will be implemented if time permits.
+
+### Priority 1: API Documentation (Swagger/OpenAPI)
+
+**Justification**: Any production API needs documentation. Swagger provides auto-generated interactive docs and enables client SDK generation.
+
+| Aspect | Details |
+|--------|---------|
+| Technology | `@fastify/swagger` + `@fastify/swagger-ui` |
+| Effort | Low (decorators on existing routes) |
+| Value | High (essential for production APIs) |
+
+### Priority 2: Authentication & Authorization
+
+**Justification**: Trader PnL data may be sensitive. API keys provide access control and usage tracking.
+
+| Aspect | Details |
+|--------|---------|
+| Technology | API Keys (simple) or JWT (if user accounts needed) |
+| Effort | Medium |
+| Value | High (security baseline) |
+
+Implementation approach:
+- API keys stored in Redis with rate limit metadata
+- Optional JWT for user-facing applications
+- No auth required for public leaderboard
+
+### Priority 3: API Rate Limiting
+
+**Justification**: Protect the API from abuse and ensure fair usage across clients.
+
+| Aspect | Details |
+|--------|---------|
+| Technology | `@fastify/rate-limit` + Redis backend |
+| Effort | Low |
+| Value | High (prevents abuse, enables tiered access) |
+
+Configuration:
+```
+Anonymous: 10 req/min
+API Key (free): 100 req/min
+API Key (premium): 1000 req/min
+```
+
+### Priority 4: Portfolio Analytics
+
+**Justification**: Raw PnL data is useful, but derived analytics (Sharpe ratio, win rate) provide actionable insights that differentiate this service.
+
+| Metric | Formula | Value |
+|--------|---------|-------|
+| Sharpe Ratio | (avg_return - risk_free) / std_dev | Risk-adjusted performance |
+| Sortino Ratio | (avg_return - risk_free) / downside_dev | Downside risk focus |
+| Win Rate | winning_trades / total_trades | Success percentage |
+| Profit Factor | gross_profit / gross_loss | Profitability ratio |
+| Max Drawdown | max(peak - trough) / peak | Worst decline |
+| Expectancy | (win_rate × avg_win) - (loss_rate × avg_loss) | Expected value per trade |
+
+Implementation: Pure TypeScript functions operating on trade history - no additional infrastructure.
+
+### Priority 5: Distributed Tracing (OpenTelemetry)
+
+**Justification**: OpenTelemetry is the industry standard for observability. It provides traces, metrics, and logs in a vendor-neutral format.
+
+| Aspect | Details |
+|--------|---------|
+| Technology | `@opentelemetry/sdk-node` + Jaeger/Zipkin exporter |
+| Effort | Medium |
+| Value | High (production debugging, performance analysis) |
+
+Benefits:
+- Trace requests through RxJS pipelines
+- Identify bottlenecks in data ingestion
+- Correlate errors across components
+
+### Priority 6: Grafana Dashboards
+
+**Justification**: Pre-built dashboards demonstrate operational readiness and make monitoring accessible.
+
+| Dashboard | Metrics |
+|-----------|---------|
+| System Health | API latency, error rates, request volume |
+| Data Ingestion | Events/sec, Hyperliquid API latency, failures |
+| Business Metrics | Active traders, snapshots created, leaderboard activity |
+
+Deliverable: JSON dashboard definitions that can be imported into any Grafana instance.
+
+### Priority 7: CI/CD Pipeline
+
+**Justification**: Automated testing and deployment demonstrates production mindset.
+
+| Stage | Actions |
+|-------|---------|
+| Lint | ESLint + Prettier check |
+| Test | Unit tests + integration tests |
+| Build | TypeScript compilation, Docker image |
+| Security | Dependency audit (`npm audit`) |
+
+Technology: GitHub Actions (free for public repos, familiar tooling)
+
+---
+
+## 10. Stretch Goals (If Additional Time Available)
+
+These features would further differentiate the solution but are lower priority than core functionality.
+
+### GraphQL API
+
+**Justification**: Offers flexibility for complex queries without multiple REST calls. Shows API design versatility.
+
+```graphql
+query {
+  trader(address: "0x...") {
+    pnl(timeframe: "7d") {
+      realized
+      unrealized
+      total
+    }
+    analytics {
+      sharpeRatio
+      winRate
+    }
+    recentTrades(limit: 10) {
+      timestamp
+      coin
+      pnl
+    }
+  }
+}
+```
+
+Technology: Mercurius (Fastify's GraphQL adapter)
+
+### Webhook Notifications
+
+**Justification**: Push-based alerts when PnL crosses thresholds - useful for trading bots and monitoring.
+
+```typescript
+// Register webhook
+POST /v1/webhooks
+{
+  "url": "https://my-app.com/webhook",
+  "events": ["pnl.threshold"],
+  "config": {
+    "threshold": 10000,
+    "direction": "above" | "below"
+  }
+}
+```
+
+Technology: BullMQ for reliable delivery with retries
+
+### Position History Tracking
+
+**Justification**: Track not just PnL snapshots but how positions evolved over time.
+
+New table:
+```sql
+CREATE TABLE position_history (
+    trader_id INTEGER,
+    coin VARCHAR(20),
+    timestamp TIMESTAMPTZ,
+    size NUMERIC(20,8),
+    entry_price NUMERIC(20,8),
+    leverage INTEGER,
+    PRIMARY KEY (trader_id, coin, timestamp)
+);
+```
+
+---
+
+## Implementation Phases
+
+### Phase 1: Core (Must Have)
+- [ ] Project setup (TypeScript, Docker)
+- [ ] Hyperliquid API client
+- [ ] RxJS data streams
+- [ ] TimescaleDB schema + migrations
+- [ ] PnL calculation engine
+- [ ] REST API (`/traders/{address}/pnl`)
+- [ ] Basic tests
+
+### Phase 2: Bonus Features (Required)
+- [ ] Leaderboard endpoint
+- [ ] Delta PnL calculations
+- [ ] Backfill strategy (BullMQ)
+- [ ] Redis caching layer
+
+### Phase 3: Production Enhancements (Time Permitting)
+- [ ] Swagger/OpenAPI documentation
+- [ ] API key authentication
+- [ ] Rate limiting
+- [ ] Portfolio analytics
+- [ ] OpenTelemetry tracing
+- [ ] Grafana dashboards
+- [ ] CI/CD pipeline (GitHub Actions)
+
+### Phase 4: Stretch Goals (If Time Allows)
+- [ ] GraphQL API
+- [ ] Webhook notifications
+- [ ] Position history tracking
+
+---
+
 ## Open Questions
 
-- [ ] **Trader source**: On-demand vs auto-discovery vs hybrid?
-- [ ] **Scale target**: Hundreds, thousands, or tens of thousands of traders?
 - [ ] **Hyperliquid batch API**: Does it support multi-trader queries?
 - [ ] **WebSocket limits**: How many subscriptions per connection?
-- [ ] **Historical backfill**: How far back should we fetch on new trader registration?
+- [ ] **Historical backfill depth**: Default to 30 days, make configurable
 
 ---
 
@@ -402,3 +605,5 @@ External API dependencies require multiple layers of protection:
 | Date | Decision | Change |
 |------|----------|--------|
 | Initial | All | Initial architecture decisions documented |
+| Update | Trader Tracking | Decided on-demand approach for initial implementation |
+| Update | Enhancements | Added production enhancements and stretch goals with justifications |

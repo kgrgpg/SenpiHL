@@ -15,6 +15,8 @@
 9. [Application Lifecycle](#application-lifecycle)
 10. [Testing Strategy](#testing-strategy)
 11. [Monitoring and Observability](#monitoring-and-observability)
+12. [Production Enhancements](#production-enhancements-time-permitting)
+13. [Implementation Roadmap](#implementation-roadmap)
 
 ---
 
@@ -31,6 +33,17 @@
 | **Redis** | Caching, leaderboards, rate limiting |
 | **BullMQ** | Backfill jobs only (persistent, resumable) |
 | **Docker Compose** | Container orchestration |
+
+### Production Enhancements (Time Permitting)
+
+| Technology | Purpose | Priority |
+|------------|---------|----------|
+| **Swagger/OpenAPI** | API documentation & client SDK generation | P1 |
+| **API Keys / JWT** | Authentication & access control | P2 |
+| **OpenTelemetry** | Distributed tracing & observability | P3 |
+| **Grafana** | Pre-built monitoring dashboards | P4 |
+| **GitHub Actions** | CI/CD pipeline | P5 |
+| **Mercurius** | GraphQL API (stretch goal) | P6 |
 
 ### Technology Rationale
 
@@ -63,6 +76,17 @@
 
 ```mermaid
 flowchart TB
+    subgraph external [External]
+        HL[Hyperliquid API]
+        Clients[API Clients]
+    end
+    
+    subgraph gateway [API Gateway - Time Permitting]
+        Swagger[Swagger Docs]
+        Auth[Authentication]
+        RateLimit[Rate Limiter]
+    end
+    
     subgraph sources [Source Observables]
         positions$["positions$ (interval 30s)"]
         fills$["fills$ (interval 5m)"]
@@ -85,7 +109,13 @@ flowchart TB
     
     subgraph api [API Layer]
         FastifyAPI[Fastify REST API]
+        Analytics[Portfolio Analytics]
     end
+    
+    HL --> positions$
+    HL --> fills$
+    HL --> funding$
+    HL --> ws$
     
     positions$ --> merge
     fills$ --> merge
@@ -100,8 +130,14 @@ flowchart TB
     retry --> cacheSink
     retry --> metricsSink
     
+    Clients --> Swagger
+    Swagger --> Auth
+    Auth --> RateLimit
+    RateLimit --> FastifyAPI
+    
     dbSink --> FastifyAPI
     cacheSink --> FastifyAPI
+    FastifyAPI --> Analytics
 ```
 
 ### Reactive Data Flow Concept
@@ -731,9 +767,90 @@ Aggregate statistics for a trader.
 }
 ```
 
+**POST /traders/:address/subscribe**
+
+Register a trader for tracking.
+
+```json
+// Request
+{
+    "backfill_days": 30  // Optional, default 30
+}
+
+// Response
+{
+    "address": "0x...",
+    "status": "tracking",
+    "backfill_job_id": "abc123"
+}
+```
+
 **GET /health** - Liveness probe
 
 **GET /ready** - Readiness probe (DB + streams active)
+
+### Endpoints (Time Permitting)
+
+These endpoints will be added if time permits:
+
+**GET /traders/:address/analytics** (Portfolio Analytics)
+
+```json
+{
+    "address": "0x...",
+    "period": "30d",
+    "metrics": {
+        "sharpe_ratio": 1.85,
+        "sortino_ratio": 2.10,
+        "max_drawdown": "-2500.00",
+        "max_drawdown_duration_days": 5,
+        "win_rate": 0.62,
+        "profit_factor": 2.15,
+        "expectancy": "45.30",
+        "avg_win": "125.50",
+        "avg_loss": "-85.20",
+        "max_consecutive_wins": 8,
+        "max_consecutive_losses": 3,
+        "trades_per_day": 12.5
+    }
+}
+```
+
+**POST /webhooks** (Webhook Registration - Stretch Goal)
+
+```json
+// Request
+{
+    "url": "https://my-app.com/webhook",
+    "events": ["pnl.threshold"],
+    "config": {
+        "threshold": 10000,
+        "direction": "above"
+    }
+}
+
+// Response
+{
+    "id": "wh_abc123",
+    "status": "active"
+}
+```
+
+**GET /docs** - Swagger UI (OpenAPI documentation)
+
+**GET /metrics** - Prometheus metrics endpoint
+
+### API Versioning Strategy
+
+All endpoints will be prefixed with `/v1/` to support future API evolution:
+
+```
+/v1/traders/:address/pnl
+/v1/traders/:address/stats
+/v1/traders/:address/analytics
+/v1/leaderboard
+/v1/webhooks
+```
 
 ### Response Caching Strategy
 
@@ -752,64 +869,82 @@ Aggregate statistics for a trader.
 src/
 ├── api/
 │   ├── routes/
-│   │   ├── traders.ts           # /traders/:address/* endpoints
-│   │   ├── leaderboard.ts       # /leaderboard endpoint
-│   │   └── health.ts            # /health, /ready endpoints
-│   ├── schemas/                 # JSON Schema for request/response validation
+│   │   ├── v1/                      # Versioned routes
+│   │   │   ├── traders.ts           # /v1/traders/:address/* endpoints
+│   │   │   ├── leaderboard.ts       # /v1/leaderboard endpoint
+│   │   │   ├── analytics.ts         # /v1/traders/:address/analytics (time permitting)
+│   │   │   └── webhooks.ts          # /v1/webhooks (stretch goal)
+│   │   └── health.ts                # /health, /ready, /metrics endpoints
+│   ├── schemas/                     # JSON Schema for request/response validation
 │   │   ├── pnl.schema.ts
-│   │   └── leaderboard.schema.ts
+│   │   ├── leaderboard.schema.ts
+│   │   └── analytics.schema.ts      # (time permitting)
 │   ├── middleware/
-│   │   └── cache.ts             # Redis cache middleware
-│   └── server.ts                # Fastify setup and plugin registration
+│   │   ├── cache.ts                 # Redis cache middleware
+│   │   ├── auth.ts                  # API key authentication (time permitting)
+│   │   └── rate-limit.ts            # Rate limiting (time permitting)
+│   ├── plugins/
+│   │   ├── swagger.ts               # OpenAPI documentation (time permitting)
+│   │   └── metrics.ts               # Prometheus metrics plugin
+│   └── server.ts                    # Fastify setup and plugin registration
 │
-├── streams/                     # RxJS Stream Definitions
-│   ├── sources/                 # Source Observables
+├── streams/                         # RxJS Stream Definitions
+│   ├── sources/                     # Source Observables
 │   │   ├── positions.stream.ts      # positions$ - clearinghouseState polling
 │   │   ├── fills.stream.ts          # fills$ - trade fills polling
 │   │   ├── funding.stream.ts        # funding$ - funding payments polling
 │   │   └── websocket.stream.ts      # wsEvents$ - real-time WebSocket
-│   ├── operators/               # Custom RxJS Operators
+│   ├── operators/                   # Custom RxJS Operators
 │   │   ├── rate-limit.ts            # Rate limiting operator
 │   │   ├── circuit-breaker.ts       # Circuit breaker pattern
 │   │   ├── with-retry.ts            # Configurable retry logic
 │   │   └── with-metrics.ts          # Prometheus metrics tap
-│   ├── processors/              # Processing Pipelines
+│   ├── processors/                  # Processing Pipelines
 │   │   ├── pnl-calculator.ts        # PnL state machine & calculation
 │   │   └── snapshot-generator.ts    # Snapshot batching logic
-│   ├── sinks/                   # Output Subscribers
+│   ├── sinks/                       # Output Subscribers
 │   │   ├── timescale.sink.ts        # Database persistence
 │   │   ├── redis.sink.ts            # Cache updates
 │   │   └── metrics.sink.ts          # Prometheus metrics emission
-│   └── index.ts                 # Main pipeline composition & export
+│   └── index.ts                     # Main pipeline composition & export
 │
-├── hyperliquid/                 # Hyperliquid API Client
-│   ├── client.ts                # REST API wrapper (returns Observables)
-│   ├── types.ts                 # API response types
-│   └── websocket.ts             # WebSocket Observable factory
+├── hyperliquid/                     # Hyperliquid API Client
+│   ├── client.ts                    # REST API wrapper (returns Observables)
+│   ├── types.ts                     # API response types
+│   └── websocket.ts                 # WebSocket Observable factory
 │
-├── pnl/                         # PnL Domain Logic (Pure Functions)
-│   ├── calculator.ts            # PnL calculation functions
-│   ├── state.ts                 # Immutable state management
-│   └── types.ts                 # PnL domain types
+├── pnl/                             # PnL Domain Logic (Pure Functions)
+│   ├── calculator.ts                # PnL calculation functions
+│   ├── state.ts                     # Immutable state management
+│   └── types.ts                     # PnL domain types
+│
+├── analytics/                       # Portfolio Analytics (Time Permitting)
+│   ├── metrics.ts                   # Sharpe, Sortino, drawdown calculations
+│   ├── streaks.ts                   # Win/loss streak analysis
+│   └── types.ts                     # Analytics types
 │
 ├── storage/
 │   ├── db/
-│   │   ├── client.ts            # PostgreSQL/TimescaleDB connection pool
-│   │   ├── migrations/          # SQL migration files
+│   │   ├── client.ts                # PostgreSQL/TimescaleDB connection pool
+│   │   ├── migrations/              # SQL migration files
 │   │   │   ├── 001_initial.sql
 │   │   │   ├── 002_hypertables.sql
 │   │   │   └── 003_continuous_aggregates.sql
-│   │   └── repositories/        # Data access layer
+│   │   └── repositories/            # Data access layer
 │   │       ├── traders.repo.ts
 │   │       ├── trades.repo.ts
 │   │       ├── snapshots.repo.ts
 │   │       └── leaderboard.repo.ts
 │   └── cache/
-│       └── redis.ts             # Redis client wrapper
+│       └── redis.ts                 # Redis client wrapper
 │
-├── backfill/                    # Historical Data Backfill (BullMQ)
-│   ├── queue.ts                 # Queue setup
-│   └── processor.ts             # Job processor (uses RxJS internally)
+├── backfill/                        # Historical Data Backfill (BullMQ)
+│   ├── queue.ts                     # Queue setup
+│   └── processor.ts                 # Job processor (uses RxJS internally)
+│
+├── webhooks/                        # Webhook System (Stretch Goal)
+│   ├── manager.ts                   # Webhook registration & management
+│   └── dispatcher.ts                # Event dispatch to webhooks
 │
 ├── utils/
 │   ├── decimal.ts               # Decimal.js wrapper for precision math
@@ -1281,13 +1416,184 @@ groups:
 
 ---
 
-## Next Steps
+## Production Enhancements (Time Permitting)
 
-1. **Review this document** - Discuss any questions or concerns about the design
-2. **Set up project skeleton** - Initialize TypeScript, install dependencies
-3. **Implement core streams** - Start with Hyperliquid client and position polling
-4. **Add database layer** - Migrations and repositories
-5. **Build API endpoints** - Fastify routes with caching
-6. **Add tests** - Unit tests for PnL logic, marble tests for streams
-7. **Docker setup** - docker-compose.yml and Dockerfile
-8. **Observability** - Prometheus metrics and structured logging
+The following enhancements elevate the solution to production-grade. They are prioritized and will be implemented if time permits after core functionality is complete.
+
+### P1: API Documentation (Swagger/OpenAPI)
+
+**Justification**: Any production API needs documentation. Enables client SDK generation and interactive testing.
+
+```typescript
+// src/api/plugins/swagger.ts
+import swagger from '@fastify/swagger';
+import swaggerUi from '@fastify/swagger-ui';
+
+await fastify.register(swagger, {
+    openapi: {
+        info: {
+            title: 'PnL Indexer API',
+            version: '1.0.0'
+        }
+    }
+});
+
+await fastify.register(swaggerUi, {
+    routePrefix: '/docs'
+});
+```
+
+### P2: Authentication (API Keys)
+
+**Justification**: Trader PnL data may be sensitive. API keys provide access control and usage tracking.
+
+```typescript
+// src/api/middleware/auth.ts
+const authenticate = async (request: FastifyRequest) => {
+    const apiKey = request.headers['x-api-key'];
+    if (!apiKey) {
+        throw { statusCode: 401, message: 'API key required' };
+    }
+    
+    const client = await redis.hgetall(`apikey:${apiKey}`);
+    if (!client) {
+        throw { statusCode: 401, message: 'Invalid API key' };
+    }
+    
+    request.client = client;
+};
+```
+
+### P3: Rate Limiting
+
+**Justification**: Protect the API from abuse and enable tiered access.
+
+```typescript
+// Configuration by tier
+const rateLimits = {
+    anonymous: { max: 10, window: '1 minute' },
+    free: { max: 100, window: '1 minute' },
+    premium: { max: 1000, window: '1 minute' }
+};
+```
+
+### P4: Portfolio Analytics
+
+**Justification**: Derived metrics provide actionable insights beyond raw PnL data.
+
+```typescript
+// src/analytics/metrics.ts
+interface PortfolioMetrics {
+    sharpeRatio: number;      // (avg_return - risk_free) / std_dev
+    sortinoRatio: number;     // Uses downside deviation only
+    maxDrawdown: number;      // Worst peak-to-trough decline
+    winRate: number;          // Winning trades / total trades
+    profitFactor: number;     // Gross profit / gross loss
+    expectancy: number;       // Expected value per trade
+}
+
+function calculateSharpeRatio(returns: number[], riskFreeRate = 0): number {
+    const avgReturn = mean(returns);
+    const stdDev = standardDeviation(returns);
+    return stdDev === 0 ? 0 : (avgReturn - riskFreeRate) / stdDev;
+}
+```
+
+### P5: OpenTelemetry Tracing
+
+**Justification**: Industry standard for distributed tracing. Essential for production debugging.
+
+```typescript
+// src/utils/tracing.ts
+import { NodeSDK } from '@opentelemetry/sdk-node';
+import { JaegerExporter } from '@opentelemetry/exporter-jaeger';
+
+const sdk = new NodeSDK({
+    traceExporter: new JaegerExporter(),
+    instrumentations: [
+        getNodeAutoInstrumentations()
+    ]
+});
+```
+
+### P6: CI/CD Pipeline (GitHub Actions)
+
+**Justification**: Automated testing and deployment demonstrates production readiness.
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+```
+
+---
+
+## Implementation Roadmap
+
+### Phase 1: Core Functionality (Required)
+
+| Task | Description | Priority |
+|------|-------------|----------|
+| Project setup | TypeScript, ESLint, Docker | P0 |
+| Hyperliquid client | REST API wrapper with RxJS | P0 |
+| Data streams | positions$, fills$, funding$ | P0 |
+| PnL calculator | Incremental calculation engine | P0 |
+| Database layer | TimescaleDB schema, migrations | P0 |
+| REST API | `/traders/:address/pnl`, `/health` | P0 |
+| Basic tests | Unit tests for PnL logic | P0 |
+
+### Phase 2: Bonus Features (Required)
+
+| Task | Description | Priority |
+|------|-------------|----------|
+| Leaderboard | `/leaderboard` with Redis ZSET | P1 |
+| Delta PnL | Change calculations between snapshots | P1 |
+| Backfill | BullMQ job for historical data | P1 |
+| Caching | Redis cache layer with TTL | P1 |
+
+### Phase 3: Production Enhancements (Time Permitting)
+
+| Task | Description | Priority |
+|------|-------------|----------|
+| Swagger docs | OpenAPI specification | P2 |
+| Authentication | API key middleware | P2 |
+| Rate limiting | Per-client limits | P2 |
+| Analytics | Sharpe, Sortino, drawdown | P2 |
+| OpenTelemetry | Distributed tracing | P3 |
+| Grafana | Pre-built dashboards | P3 |
+| CI/CD | GitHub Actions pipeline | P3 |
+
+### Phase 4: Stretch Goals (If Time Allows)
+
+| Task | Description | Priority |
+|------|-------------|----------|
+| GraphQL API | Alternative query interface | P4 |
+| Webhooks | Push notifications on thresholds | P4 |
+| Position history | Track position changes over time | P4 |
+
+---
+
+## Summary
+
+This architecture provides a production-grade foundation for a PnL indexing service:
+
+- **Reactive streams** (RxJS) for declarative, testable data flows
+- **TimescaleDB** for efficient time-series storage with automatic aggregation
+- **Redis** for caching, leaderboards, and rate limiting
+- **Fastify** for high-performance API serving
+- **Defense in depth** error handling with retry, circuit breaker, and graceful degradation
+
+The modular design allows core functionality to be delivered first, with production enhancements layered on as time permits.
