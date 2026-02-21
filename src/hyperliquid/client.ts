@@ -17,7 +17,12 @@ import type {
 const API_URL = config.HYPERLIQUID_API_URL;
 
 async function postInfo<T>(request: HyperliquidInfoRequest, priority: RequestPriority = 'polling'): Promise<T> {
-  rateBudget.record(priority);
+  // Wait if over budget -- backfill/polling back off, user requests always proceed
+  let attempts = 0;
+  while (!rateBudget.record(priority) && priority !== 'user' && attempts < 10) {
+    await new Promise(r => setTimeout(r, 1000 + Math.random() * 2000));
+    attempts++;
+  }
 
   const response = await fetch(`${API_URL}/info`, {
     method: 'POST',

@@ -44,6 +44,8 @@ import {
   concatMap,
   takeUntil,
   mergeMap,
+  toArray,
+  delay,
 } from 'rxjs/operators';
 
 import { config } from '../../utils/config.js';
@@ -227,20 +229,16 @@ export class HybridDataStream {
 
           logger.info({ count: tradersToRefresh.length }, 'Refreshing position snapshots');
 
-          // Process in batches with delay between batches
+          // Process in batches of 10 with 3s delay between batches
+          // 1000 traders = 100 batches × 3s = 300s = 5min (matches poll interval)
           return from(tradersToRefresh).pipe(
             bufferTime(100, null, BATCH_SIZE),
             filter((batch) => batch.length > 0),
             concatMap((batch) =>
-              // Fetch snapshots for this batch (reactive)
               from(batch).pipe(
                 mergeMap((address) => this.fetchSnapshot$(address)),
-                // Delay after processing batch
-                tap({
-                  complete: () => {
-                    /* Small gap between batches handled by concatMap */
-                  },
-                })
+                toArray(),
+                delay(3000),
               )
             )
           );

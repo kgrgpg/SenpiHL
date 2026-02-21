@@ -57,11 +57,11 @@ class RateBudgetManager {
 
       const data = await res.json() as { nRequestsCap: number; nRequestsUsed: number };
 
-      // nRequestsCap is total capacity per window (not per minute necessarily)
-      // Hyperliquid's window is ~1 minute, cap scales with trading volume
-      // We use a conservative interpretation: treat as per-minute cap
-      // but clamp to a reasonable range (1200 - 10000)
-      const probedCap = Math.min(10000, Math.max(DEFAULT_MAX_PER_MINUTE, data.nRequestsCap));
+      // nRequestsCap is the TOTAL lifetime cap (not per-minute).
+      // The actual per-minute limit is ~1,200 for non-trading IPs.
+      // nRequestsUsed shows how many we've consumed of the lifetime cap.
+      // We keep our conservative per-minute limit but log the probe.
+      const probedCap = DEFAULT_MAX_PER_MINUTE;
 
       if (probedCap !== this.maxPerMinute) {
         logger.info({

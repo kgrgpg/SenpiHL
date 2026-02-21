@@ -14,6 +14,10 @@ vi.mock('../../../storage/cache/redis.js', () => ({
   cacheSet: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock('../../../storage/db/client.js', () => ({
+  query: vi.fn().mockResolvedValue({ rows: [{ oldest: new Date(), newest: new Date() }] }),
+}));
+
 vi.mock('../../../utils/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));

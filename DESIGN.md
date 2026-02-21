@@ -263,41 +263,43 @@ Hyperliquid allows ~1,200 requests/minute per IP (no auth required). This budget
 
 ### Decision
 
-**Chosen: Adaptive rate budget with 80% utilization target**
+**Chosen: Weight-based adaptive rate budget targeting 80% of 1,200 weight/min**
 
-### How It Works
+### Hyperliquid Rate Limits (Official)
+
+Limits are **weight-based per IP** ([docs](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits)):
+
+| Endpoint | Weight | Notes |
+|----------|--------|-------|
+| `clearinghouseState` | 2 | Position snapshots |
+| `userFillsByTime` | 20 + per 20 items | Backfill, on-demand |
+| `userFunding` | 20 + per 20 items | Backfill, on-demand |
+| `portfolio` | 20 | On-demand verification |
+| WebSocket `userFills` | 0 (push) | **Max 10 unique users** |
+
+### Budget Allocation (1,000 traders)
 
 ```
-Total budget: 1,200 req/min
-Target utilization: 80% = 960 req/min
-Safety margin: 20% = 240 req/min (burst headroom)
+Total: 1,200 weight/min | Target 80%: 960 weight/min
 
-Backfill budget = 960 - polling_used - ondemand_used
-Worker count = backfill_budget / 120 (each worker ~120 req/min)
+Polling (1000 × 2 / 5min)           = 400 weight/min
+Discovery (8 coins × 20 / 5min)     =  32 weight/min
+User on-demand (reserved)            = ~100 weight/min
+Backfill (remaining)                 = ~428 weight/min → ~10 chunks/min
 ```
 
-Priority levels (highest first):
-1. **User requests** (on-demand fetch for unknown traders)
-2. **Position polling** (real-time snapshot updates)
-3. **Backfill workers** (historical data, scales up/down)
+### Key Constraints
 
-### Scenarios
-
-| State | Polling | On-Demand | Backfill | Workers | Utilization |
-|-------|---------|-----------|----------|---------|-------------|
-| Idle | 114/min | 0/min | 846/min | 7 | 80% |
-| Moderate | 114/min | 100/min | 746/min | 6 | 80% |
-| Burst | 114/min | 500/min | 346/min | 3 | 80% |
+- **WebSocket**: only 10 unique users for `userFills` (not 1000)
+- **Startup burst**: must stagger polling across the 5-min interval
+- **Backfill chunk**: 40+ weight (fills + funding), not 2
+- **Max traders**: ~3,000 before polling alone hits the limit
 
 ### On-Demand Fetching
 
-When a user queries an unknown trader (`GET /traders/:address/pnl`), instead of returning 404:
-1. Fetch `clearinghouseState` from Hyperliquid (1 request)
-2. Fetch recent fills (1 request)
-3. Calculate PnL, store snapshot, return to user (~2 seconds)
-4. Schedule 30-day backfill in background
+Per-trader query costs ~60 weight (portfolio + fills + funding). User requests take priority; backfill workers pause.
 
-This means any trader address works on first request.
+Full analysis: [RATE_LIMIT_ANALYSIS.md](./RATE_LIMIT_ANALYSIS.md)
 
 ---
 
@@ -308,10 +310,10 @@ This means any trader address works on first request.
 | Message Queue | RxJS (no Kafka) | <100 TPS, single service, API bottleneck |
 | Trader Tracking | On-demand | Explicit registration, add discovery later |
 | Database | TimescaleDB | Hypertables, continuous aggregates, compression |
-| Data Ingestion | Hybrid (WS + polling) | Real-time events + consistent state |
+| Data Ingestion | Hybrid (WS for top 10 + polling) | WS limited to 10 users, poll the rest |
 | PnL Calculation | Incremental updates | O(1), handle edge cases |
 | Snapshot Granularity | 1 minute | Flexibility vs storage balance |
 | Caching | Redis + TTL | Simple, append-only is cache-friendly |
 | Error Handling | Defense in depth | Retry, circuit breaker, graceful degradation |
 | Data Storage | Trades + Snapshots | Audit trail + read-optimized projections |
-| Rate Budget | Adaptive 80% target | Maximize throughput, prioritize users |
+| Rate Budget | Weight-based, 80% target | Correct weights per endpoint, staggered polling |
