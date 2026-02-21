@@ -132,24 +132,37 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           <!-- Address -->
           <div class="text-xs text-slate-500 mb-4 font-mono" x-text="traderAddress"></div>
 
-          <!-- PnL Cards -->
-          <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+          <!-- PnL Cards (Our Calculation) -->
+          <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-4">
             <div class="bg-slate-900 border border-slate-800 rounded-lg p-4">
               <div class="text-xs text-slate-500 mb-1">Total PnL</div>
-              <div class="text-xl font-bold" :class="parseFloat(traderData.summary.current_pnl) >= 0 ? 'text-emerald-400' : 'text-red-400'" x-text="'$' + fmtPnl(traderData.summary.current_pnl)"></div>
+              <div class="text-xl font-bold" :class="parseFloat(traderData.summary.total_pnl || '0') >= 0 ? 'text-emerald-400' : 'text-red-400'" x-text="'$' + fmtPnl(traderData.summary.total_pnl || '0')"></div>
             </div>
             <div class="bg-slate-900 border border-slate-800 rounded-lg p-4">
               <div class="text-xs text-slate-500 mb-1">Realized</div>
-              <div class="text-xl font-bold text-white" x-text="'$' + fmtPnl(traderData.summary.total_realized)"></div>
+              <div class="text-xl font-bold text-white" x-text="'$' + fmtPnl(traderData.summary.realized_pnl || '0')"></div>
             </div>
             <div class="bg-slate-900 border border-slate-800 rounded-lg p-4">
-              <div class="text-xs text-slate-500 mb-1">Peak PnL</div>
-              <div class="text-xl font-bold text-emerald-400" x-text="'$' + fmtPnl(traderData.summary.peak_pnl)"></div>
+              <div class="text-xs text-slate-500 mb-1">Unrealized</div>
+              <div class="text-xl font-bold" :class="parseFloat(traderData.summary.unrealized_pnl || '0') >= 0 ? 'text-emerald-400' : 'text-red-400'" x-text="'$' + fmtPnl(traderData.summary.unrealized_pnl || '0')"></div>
             </div>
             <div class="bg-slate-900 border border-slate-800 rounded-lg p-4">
-              <div class="text-xs text-slate-500 mb-1">Max Drawdown</div>
-              <div class="text-xl font-bold text-red-400" x-text="'$' + fmtPnl(traderData.summary.max_drawdown)"></div>
+              <div class="text-xs text-slate-500 mb-1">Trades</div>
+              <div class="text-xl font-bold text-white" x-text="(traderData.summary.trade_count || 0).toLocaleString()"></div>
             </div>
+            <div class="bg-slate-900 border border-slate-800 rounded-lg p-4">
+              <div class="text-xs text-slate-500 mb-1">Volume</div>
+              <div class="text-xl font-bold text-white" x-text="'$' + fmtPnl(traderData.summary.volume || '0')"></div>
+            </div>
+          </div>
+
+          <!-- Verification (Hyperliquid cross-check) -->
+          <div x-show="traderData.verification" class="mb-4 bg-slate-900 border border-slate-800 rounded-lg p-3 flex items-center justify-between">
+            <div class="text-xs text-slate-400">
+              <span class="font-semibold text-slate-300">Hyperliquid says:</span>
+              <span class="ml-2" :class="parseFloat(traderData.verification?.total_pnl || '0') >= 0 ? 'text-emerald-400' : 'text-red-400'" x-text="'$' + fmtPnl(traderData.verification?.total_pnl || '0')"></span>
+            </div>
+            <div class="text-xs" :class="Math.abs(parseFloat(traderData.verification?.delta || '0')) < 100 ? 'text-emerald-400' : 'text-amber-400'" x-text="'Delta: $' + fmtPnl(traderData.verification?.delta || '0')"></div>
           </div>
 
           <!-- Chart -->
@@ -240,6 +253,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         traderData: null,
         traderLoading: false,
         traderTimeframe: '1d',
+        traderCache: {},
         recentTrades: [],
         pnlChart: null,
 
@@ -293,6 +307,15 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
         async fetchTrader() {
           if (!this.traderAddress) return;
+
+          const cacheKey = this.traderAddress + ':' + this.traderTimeframe;
+          const cached = this.traderCache[cacheKey];
+          if (cached && Date.now() - cached.ts < 30000) {
+            this.traderData = cached.data;
+            this.$nextTick(() => this.renderChart(cached.data));
+            return;
+          }
+
           this.traderLoading = true;
           this.traderData = null;
           try {
@@ -300,6 +323,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
             if (!res.ok) throw new Error('Not found');
             const data = await res.json();
             this.traderData = data;
+            this.traderCache[cacheKey] = { data, ts: Date.now() };
             this.$nextTick(() => this.renderChart(data));
           } catch(e) {
             this.traderData = null;

@@ -81,8 +81,19 @@ export async function getFundingForTrader(
   return result.rows;
 }
 
+export async function getFundingPnl(traderId: number, from: Date, to: Date): Promise<string> {
+  const result = await query<{ funding_pnl: string }>(
+    `SELECT COALESCE(SUM(payment), 0)::text as funding_pnl
+     FROM funding_payments
+     WHERE trader_id = $1 AND timestamp >= $2 AND timestamp <= $3`,
+    [traderId, from, to]
+  );
+  return result.rows[0]?.funding_pnl ?? '0';
+}
+
 export const fundingRepo = {
   insert: insertFunding,
   insertMany: insertFundingBatch,
   getForTrader: getFundingForTrader,
+  getFundingPnl,
 };

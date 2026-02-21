@@ -106,9 +106,40 @@ export async function getTradeCount(traderId: number, from: Date, to: Date): Pro
   return parseInt(result.rows[0]?.count ?? '0');
 }
 
+export async function getRealizedPnlSummary(traderId: number, from: Date, to: Date): Promise<{
+  realized_pnl: string;
+  total_fees: string;
+  trade_count: number;
+  total_volume: string;
+}> {
+  const result = await query<{
+    realized_pnl: string;
+    total_fees: string;
+    trade_count: string;
+    total_volume: string;
+  }>(
+    `SELECT 
+      COALESCE(SUM(closed_pnl), 0)::text as realized_pnl,
+      COALESCE(SUM(fee), 0)::text as total_fees,
+      COUNT(*)::text as trade_count,
+      COALESCE(SUM(size * price), 0)::text as total_volume
+     FROM trades
+     WHERE trader_id = $1 AND timestamp >= $2 AND timestamp <= $3`,
+    [traderId, from, to]
+  );
+  const row = result.rows[0]!;
+  return {
+    realized_pnl: row.realized_pnl,
+    total_fees: row.total_fees,
+    trade_count: parseInt(row.trade_count),
+    total_volume: row.total_volume,
+  };
+}
+
 export const tradesRepo = {
   insert: insertTrade,
   insertMany: insertTrades,
   getForTrader: getTradesForTrader,
   getCount: getTradeCount,
+  getRealizedPnlSummary,
 };
