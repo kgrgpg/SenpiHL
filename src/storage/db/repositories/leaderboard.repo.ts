@@ -1,8 +1,8 @@
-import { firstValueFrom, forkJoin, from, of, timer } from 'rxjs';
+import { firstValueFrom, from, of } from 'rxjs';
 import { map, catchError, mergeMap, toArray } from 'rxjs/operators';
 
 import { fetchPortfolio } from '../../../hyperliquid/client.js';
-import type { HyperliquidPortfolio } from '../../../hyperliquid/types.js';
+import type { HyperliquidPortfolio, PortfolioPeriod } from '../../../hyperliquid/types.js';
 import { logger } from '../../../utils/logger.js';
 import { query } from '../client.js';
 
@@ -11,12 +11,10 @@ export interface LeaderboardRow {
   address: string;
   trader_id: number;
   total_pnl: string;
-  realized_pnl: string;
-  unrealized_pnl: string;
-  volume: string;
   trade_count: number;
   tracking_since: string | null;
-  data_source: 'calculated' | 'hyperliquid_portfolio';
+  data_source: 'hyperliquid_portfolio' | 'snapshot_delta';
+  timeframe_coverage: 'full' | 'partial';
 }
 
 export interface AllTimeLeaderboardRow {
@@ -31,124 +29,163 @@ export interface AllTimeLeaderboardRow {
   data_source: 'hyperliquid_portfolio';
 }
 
+const PORTFOLIO_PERIOD_MAP: Record<string, PortfolioPeriod> = {
+  '1d': 'perpDay',
+  '7d': 'perpWeek',
+  '30d': 'perpMonth',
+};
+
 /**
- * Get time-bounded leaderboard from our calculated snapshots
- * Uses DELTA calculation: (latest PnL) - (earliest PnL in timeframe)
- * Use for: 1d, 7d, 30d rankings
+ * Two-phase leaderboard:
+ * 1. Get rough candidate set from snapshot deltas (fast, from DB)
+ * 2. Fetch authoritative PnL from portfolio API for the top candidates
+ * 3. Re-rank by the authoritative figure
+ *
+ * This gives us accurate numbers without fetching portfolio for 1000+ traders.
  */
 export async function getLeaderboard(
   timeframe: '1d' | '7d' | '30d',
-  metric: 'total_pnl' | 'realized_pnl' | 'volume',
+  _metric: 'total_pnl' | 'realized_pnl' | 'volume',
   limit: number = 50
 ): Promise<LeaderboardRow[]> {
   const days = timeframe === '1d' ? 1 : timeframe === '7d' ? 7 : 30;
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const portfolioPeriod = PORTFOLIO_PERIOD_MAP[timeframe]!;
 
-  const orderColumn = metric === 'volume' ? 'delta_volume' : `delta_${metric}`;
-
-  // Delta PnL: latest - earliest in timeframe
-  // Excludes zero-PnL snapshots (backfill initialization artifacts)
-  // Volume: MAX in timeframe (immune to restart-resets)
-  // Trade count: from trades table
-  const result = await query<LeaderboardRow>(
+  // Phase 1: get a broad candidate set from snapshots (2x limit to account for re-ranking)
+  const candidateLimit = Math.min(limit * 2, 200);
+  const candidates = await query<{
+    trader_id: number;
+    address: string;
+    first_seen_at: string;
+    delta_pnl: string;
+  }>(
     `WITH valid_snapshots AS (
       SELECT * FROM pnl_snapshots
       WHERE timestamp >= $1
         AND NOT (total_pnl = 0 AND realized_pnl = 0 AND unrealized_pnl = 0)
     ),
-    earliest_snapshots AS (
-      SELECT DISTINCT ON (trader_id)
-        trader_id,
-        total_pnl as start_total_pnl,
-        realized_pnl as start_realized_pnl,
-        unrealized_pnl as start_unrealized_pnl
-      FROM valid_snapshots
-      ORDER BY trader_id, timestamp ASC
+    earliest AS (
+      SELECT DISTINCT ON (trader_id) trader_id, total_pnl as start_pnl
+      FROM valid_snapshots ORDER BY trader_id, timestamp ASC
     ),
-    latest_snapshots AS (
-      SELECT DISTINCT ON (trader_id)
-        trader_id,
-        total_pnl as end_total_pnl,
-        realized_pnl as end_realized_pnl,
-        unrealized_pnl as end_unrealized_pnl
-      FROM valid_snapshots
-      ORDER BY trader_id, timestamp DESC
+    latest AS (
+      SELECT DISTINCT ON (trader_id) trader_id, total_pnl as end_pnl
+      FROM valid_snapshots ORDER BY trader_id, timestamp DESC
     ),
-    max_volume AS (
-      SELECT trader_id, MAX(total_volume) as peak_volume
-      FROM valid_snapshots
-      GROUP BY trader_id
-    ),
-    trade_counts AS (
-      SELECT trader_id, COUNT(*)::int as trade_count
-      FROM trades
-      WHERE timestamp >= $1
-      GROUP BY trader_id
-    ),
-    delta_pnl AS (
-      SELECT 
-        ls.trader_id,
-        (ls.end_total_pnl::numeric - COALESCE(es.start_total_pnl::numeric, 0)) as delta_total_pnl,
-        (ls.end_realized_pnl::numeric - COALESCE(es.start_realized_pnl::numeric, 0)) as delta_realized_pnl,
-        (ls.end_unrealized_pnl::numeric - COALESCE(es.start_unrealized_pnl::numeric, 0)) as delta_unrealized_pnl,
-        COALESCE(mv.peak_volume, 0) as delta_volume
-      FROM latest_snapshots ls
-      LEFT JOIN earliest_snapshots es ON es.trader_id = ls.trader_id
-      LEFT JOIN max_volume mv ON mv.trader_id = ls.trader_id
+    delta AS (
+      SELECT l.trader_id,
+        (l.end_pnl::numeric - COALESCE(e.start_pnl::numeric, 0)) as delta_pnl
+      FROM latest l LEFT JOIN earliest e ON e.trader_id = l.trader_id
     )
-    SELECT 
-      ROW_NUMBER() OVER (ORDER BY dp.${orderColumn} DESC) as rank,
-      t.address,
-      t.id as trader_id,
-      dp.delta_total_pnl::text as total_pnl,
-      dp.delta_realized_pnl::text as realized_pnl,
-      dp.delta_unrealized_pnl::text as unrealized_pnl,
-      dp.delta_volume::text as volume,
-      COALESCE(tc.trade_count, 0)::int as trade_count,
-      t.first_seen_at as tracking_since,
-      'calculated' as data_source
-    FROM delta_pnl dp
-    JOIN traders t ON t.id = dp.trader_id
-    LEFT JOIN trade_counts tc ON tc.trader_id = dp.trader_id
-    ORDER BY dp.${orderColumn} DESC
+    SELECT d.trader_id, t.address, t.first_seen_at,
+      d.delta_pnl::text as delta_pnl
+    FROM delta d
+    JOIN traders t ON t.id = d.trader_id
+    ORDER BY d.delta_pnl DESC
     LIMIT $2`,
-    [since, limit]
+    [since, candidateLimit]
   );
 
-  return result.rows;
+  if (candidates.rows.length === 0) return [];
+
+  // Phase 2: fetch authoritative portfolio PnL for candidates
+  const results = await firstValueFrom(
+    from(candidates.rows).pipe(
+      mergeMap(
+        (trader) => fetchPortfolio(trader.address).pipe(
+          map((portfolio) => {
+            const portfolioMap = new Map(portfolio as HyperliquidPortfolio);
+            const periodData = portfolioMap.get(portfolioPeriod);
+            const pnlHistory = periodData?.pnlHistory ?? [];
+            const totalPnl = pnlHistory.length > 0
+              ? pnlHistory[pnlHistory.length - 1]![1]
+              : null;
+
+            const trackingSince = new Date(trader.first_seen_at);
+            const timeframeStart = since;
+            const hasFull = trackingSince <= timeframeStart;
+
+            return {
+              trader_id: trader.trader_id,
+              address: trader.address,
+              tracking_since: trader.first_seen_at,
+              total_pnl: totalPnl,
+              timeframe_coverage: hasFull ? 'full' as const : 'partial' as const,
+              data_source: 'hyperliquid_portfolio' as const,
+            };
+          }),
+          catchError((err) => {
+            logger.debug({ address: trader.address, error: (err as Error).message },
+              'Portfolio fetch failed, using snapshot delta');
+            return of({
+              trader_id: trader.trader_id,
+              address: trader.address,
+              tracking_since: trader.first_seen_at,
+              total_pnl: trader.delta_pnl,
+              timeframe_coverage: 'partial' as const,
+              data_source: 'snapshot_delta' as const,
+            });
+          })
+        ),
+        5 // concurrency: 5 parallel portfolio fetches
+      ),
+      toArray()
+    )
+  );
+
+  // Get trade counts from DB
+  const tradeCountResult = await query<{ trader_id: number; cnt: string }>(
+    `SELECT trader_id, COUNT(*)::text as cnt FROM trades
+     WHERE timestamp >= $1 GROUP BY trader_id`,
+    [since]
+  );
+  const tradeCounts = new Map(tradeCountResult.rows.map(r => [r.trader_id, parseInt(r.cnt)]));
+
+  // Phase 3: rank by authoritative PnL
+  return results
+    .filter((r) => r.total_pnl !== null)
+    .sort((a, b) => parseFloat(b.total_pnl!) - parseFloat(a.total_pnl!))
+    .slice(0, limit)
+    .map((entry, index) => ({
+      rank: index + 1,
+      address: entry.address,
+      trader_id: entry.trader_id,
+      total_pnl: entry.total_pnl!,
+      trade_count: tradeCounts.get(entry.trader_id) ?? 0,
+      tracking_since: entry.tracking_since,
+      data_source: entry.data_source,
+      timeframe_coverage: entry.timeframe_coverage,
+    }));
 }
 
 /**
- * Get all-time leaderboard using Hyperliquid's portfolio endpoint
- * This is the AUTHORITATIVE all-time PnL directly from Hyperliquid
+ * All-time leaderboard using Hyperliquid's portfolio endpoint (authoritative).
+ * Fetches portfolio for top candidates from DB.
  */
 export async function getAllTimeLeaderboard(
   limit: number = 50
 ): Promise<AllTimeLeaderboardRow[]> {
-  // Get all tracked traders
-  const tradersResult = await query<{
+  // Get candidates: traders with highest snapshot PnL as rough ranking
+  const candidateLimit = Math.min(limit * 2, 200);
+  const candidates = await query<{
     id: number;
     address: string;
     first_seen_at: string;
-  }>('SELECT id, address, first_seen_at FROM traders WHERE is_active = true');
+  }>(
+    `SELECT DISTINCT ON (t.id) t.id, t.address, t.first_seen_at
+     FROM traders t
+     JOIN pnl_snapshots ps ON ps.trader_id = t.id
+     WHERE t.is_active = true
+     ORDER BY t.id, ps.total_pnl DESC
+     LIMIT $1`,
+    [candidateLimit]
+  );
 
-  if (tradersResult.rows.length === 0) {
-    return [];
-  }
+  if (candidates.rows.length === 0) return [];
 
-  // Fetch portfolio data for each trader (batched to respect rate limits)
-  const portfolioData: Array<{
-    trader_id: number;
-    address: string;
-    tracking_since: string;
-    portfolio: HyperliquidPortfolio | null;
-  }> = [];
-
-  const traders = tradersResult.rows;
-
-  // Fetch portfolios using forkJoin for parallel batch processing
   const results = await firstValueFrom(
-    from(traders).pipe(
+    from(candidates.rows).pipe(
       mergeMap(
         (trader) => fetchPortfolio(trader.address).pipe(
           map(portfolio => ({
@@ -158,10 +195,8 @@ export async function getAllTimeLeaderboard(
             portfolio: portfolio as HyperliquidPortfolio | null,
           })),
           catchError(err => {
-            logger.warn(
-              { address: trader.address, error: (err as Error).message },
-              'Failed to fetch portfolio for leaderboard'
-            );
+            logger.warn({ address: trader.address, error: (err as Error).message },
+              'Failed to fetch portfolio for leaderboard');
             return of({
               trader_id: trader.id,
               address: trader.address,
@@ -170,16 +205,13 @@ export async function getAllTimeLeaderboard(
             });
           })
         ),
-        10 // concurrency limit: 10 parallel fetches
+        5
       ),
       toArray()
     )
   );
 
-  portfolioData.push(...results);
-
-  // Extract PnL from portfolio data and rank
-  const leaderboardData = portfolioData
+  return results
     .filter((p) => p.portfolio !== null)
     .map((p) => {
       const portfolioMap = new Map(p.portfolio!);
@@ -210,12 +242,10 @@ export async function getAllTimeLeaderboard(
       ...entry,
       data_source: 'hyperliquid_portfolio' as const,
     }));
-
-  return leaderboardData;
 }
 
 /**
- * Get a specific trader's rank (uses delta calculation)
+ * Get a specific trader's rank
  */
 export async function getTraderRank(
   traderId: number,
@@ -223,58 +253,14 @@ export async function getTraderRank(
   metric: 'total_pnl' | 'realized_pnl' | 'volume'
 ): Promise<number | null> {
   if (timeframe === 'all') {
-    // For all-time, we need to fetch all portfolios and calculate rank
-    const leaderboard = await getAllTimeLeaderboard(1000);
+    const leaderboard = await getAllTimeLeaderboard(200);
     const entry = leaderboard.find((e) => e.trader_id === traderId);
     return entry?.rank ?? null;
   }
 
-  const days = timeframe === '1d' ? 1 : timeframe === '7d' ? 7 : 30;
-  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-
-  const orderColumn = metric === 'volume' ? 'delta_volume' : `delta_${metric}`;
-
-  const result = await query<{ rank: number }>(
-    `WITH earliest_snapshots AS (
-      SELECT DISTINCT ON (trader_id)
-        trader_id,
-        total_pnl as start_total_pnl,
-        realized_pnl as start_realized_pnl,
-        total_volume as start_volume
-      FROM pnl_snapshots
-      WHERE timestamp >= $1
-      ORDER BY trader_id, timestamp ASC
-    ),
-    latest_snapshots AS (
-      SELECT DISTINCT ON (trader_id)
-        trader_id,
-        total_pnl as end_total_pnl,
-        realized_pnl as end_realized_pnl,
-        total_volume as end_volume
-      FROM pnl_snapshots
-      WHERE timestamp >= $1
-      ORDER BY trader_id, timestamp DESC
-    ),
-    delta_pnl AS (
-      SELECT 
-        ls.trader_id,
-        (ls.end_total_pnl::numeric - COALESCE(es.start_total_pnl::numeric, 0)) as delta_total_pnl,
-        (ls.end_realized_pnl::numeric - COALESCE(es.start_realized_pnl::numeric, 0)) as delta_realized_pnl,
-        (ls.end_volume::numeric - COALESCE(es.start_volume::numeric, 0)) as delta_volume
-      FROM latest_snapshots ls
-      LEFT JOIN earliest_snapshots es ON es.trader_id = ls.trader_id
-    ),
-    ranked AS (
-      SELECT 
-        trader_id,
-        ROW_NUMBER() OVER (ORDER BY ${orderColumn} DESC) as rank
-      FROM delta_pnl
-    )
-    SELECT rank FROM ranked WHERE trader_id = $2`,
-    [since, traderId]
-  );
-
-  return result.rows[0]?.rank ?? null;
+  const leaderboard = await getLeaderboard(timeframe, metric, 200);
+  const entry = leaderboard.find((e) => e.trader_id === traderId);
+  return entry?.rank ?? null;
 }
 
 export const leaderboardRepo = {

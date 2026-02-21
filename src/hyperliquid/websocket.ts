@@ -77,8 +77,10 @@ export class HyperliquidWebSocket {
   private readonly destroy$ = new Subject<void>();
   private readonly subscriptions = new Map<string, Subscription>();
   private reconnectAttempts = 0;
-  private readonly maxReconnectAttempts = 10;
+  private readonly maxReconnectAttempts = 50;
   private readonly baseReconnectDelay = 1000;
+  private lastConnectedAt = 0;
+  private static readonly MIN_STABLE_MS = 30_000; // 30s before considering connection stable
 
   constructor() {
     this.setupAutoReconnect();
@@ -124,7 +126,7 @@ export class HyperliquidWebSocket {
       this.ws.on('open', () => {
         logger.info('WebSocket connected');
         this.connectionState.next('connected');
-        this.reconnectAttempts = 0;
+        this.lastConnectedAt = Date.now();
         this.resubscribeAll();
         this.startHeartbeat();
       });
@@ -140,7 +142,14 @@ export class HyperliquidWebSocket {
       });
 
       this.ws.on('close', (code, reason) => {
-        logger.warn({ code, reason: reason.toString() }, 'WebSocket disconnected');
+        const uptime = Date.now() - this.lastConnectedAt;
+        logger.warn({ code, reason: reason.toString(), uptimeMs: uptime }, 'WebSocket disconnected');
+
+        // Only reset backoff if connection was stable (30s+)
+        if (uptime >= HyperliquidWebSocket.MIN_STABLE_MS) {
+          this.reconnectAttempts = 0;
+        }
+
         this.connectionState.next('disconnected');
         this.ws = null;
       });
@@ -357,10 +366,13 @@ export class HyperliquidWebSocket {
           }
 
           this.reconnectAttempts++;
-          const delay = this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
+          const delay = Math.min(
+            this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts - 1),
+            60_000 // cap at 60s
+          );
 
           logger.info(
-            { attempt: this.reconnectAttempts, delay },
+            { attempt: this.reconnectAttempts, delay, maxAttempts: this.maxReconnectAttempts },
             'Scheduling reconnection'
           );
 

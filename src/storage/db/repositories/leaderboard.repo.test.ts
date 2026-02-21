@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { of, throwError } from 'rxjs';
 
 vi.mock('../client.js', () => ({
   query: vi.fn(),
@@ -9,152 +10,160 @@ vi.mock('../../../hyperliquid/client.js', () => ({
 }));
 
 vi.mock('../../../utils/logger.js', () => ({
-  logger: { warn: vi.fn(), info: vi.fn() },
+  logger: { warn: vi.fn(), info: vi.fn(), debug: vi.fn() },
 }));
 
 import { query } from '../client.js';
-import { getLeaderboard, getTraderRank } from './leaderboard.repo.js';
+import { fetchPortfolio } from '../../../hyperliquid/client.js';
+import { getLeaderboard, getAllTimeLeaderboard } from './leaderboard.repo.js';
 
-describe('Leaderboard Repository - Delta Calculation', () => {
+function mockPortfolio(perpDayPnl: string, perpWeekPnl: string, perpMonthPnl: string, perpAllTimePnl: string) {
+  return of([
+    ['perpDay', { pnlHistory: [[Date.now(), perpDayPnl]], vlm: '100000', accountValueHistory: [] }],
+    ['perpWeek', { pnlHistory: [[Date.now(), perpWeekPnl]], vlm: '500000', accountValueHistory: [] }],
+    ['perpMonth', { pnlHistory: [[Date.now(), perpMonthPnl]], vlm: '2000000', accountValueHistory: [] }],
+    ['perpAllTime', { pnlHistory: [[Date.now(), perpAllTimePnl]], vlm: '10000000', accountValueHistory: [] }],
+    ['allTime', { pnlHistory: [[Date.now(), perpAllTimePnl]], vlm: '10000000', accountValueHistory: [] }],
+  ]);
+}
+
+describe('Leaderboard Repository', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  describe('getLeaderboard', () => {
-    it('should calculate delta PnL (latest - earliest) for 7d timeframe', async () => {
-      const mockRows = [
-        {
-          rank: 1,
-          address: '0xWinner',
-          trader_id: 1,
-          total_pnl: '1000.00',
-          realized_pnl: '800.00',
-          unrealized_pnl: '200.00',
-          volume: '50000.00',
-          trade_count: 0,
-          tracking_since: '2026-01-01',
-          data_source: 'calculated',
-        },
-        {
-          rank: 2,
-          address: '0xLoser',
-          trader_id: 2,
-          total_pnl: '-500.00',
-          realized_pnl: '-400.00',
-          unrealized_pnl: '-100.00',
-          volume: '10000.00',
-          trade_count: 0,
-          tracking_since: '2026-01-01',
-          data_source: 'calculated',
-        },
-      ];
+  describe('getLeaderboard (two-phase: snapshots + portfolio)', () => {
+    it('should fetch portfolio for candidates and rank by authoritative PnL', async () => {
+      // Phase 1: snapshot candidates
+      vi.mocked(query)
+        .mockResolvedValueOnce({
+          rows: [
+            { trader_id: 1, address: '0xWinner', first_seen_at: '2026-01-01', delta_pnl: '5000' },
+            { trader_id: 2, address: '0xLoser', first_seen_at: '2026-01-01', delta_pnl: '3000' },
+          ],
+          rowCount: 2,
+        })
+        // Phase 3: trade counts
+        .mockResolvedValueOnce({
+          rows: [{ trader_id: 1, cnt: '50' }],
+          rowCount: 1,
+        });
 
-      vi.mocked(query).mockResolvedValue({ rows: mockRows, rowCount: 2 });
+      // Phase 2: portfolio fetches (0xLoser actually has higher 7d PnL than 0xWinner)
+      vi.mocked(fetchPortfolio)
+        .mockImplementation((address: string) => {
+          if (address === '0xWinner') return mockPortfolio('1000', '8000', '20000', '100000');
+          return mockPortfolio('2000', '15000', '30000', '50000');
+        });
 
-      const result = await getLeaderboard('7d', 'total_pnl', 50);
+      const result = await getLeaderboard('7d', 'total_pnl', 10);
 
-      expect(result).toEqual(mockRows);
-      expect(query).toHaveBeenCalledTimes(1);
-
-      const [sqlQuery] = vi.mocked(query).mock.calls[0]!;
-
-      // Verify SQL contains delta calculation logic
-      expect(sqlQuery).toContain('earliest_snapshots');
-      expect(sqlQuery).toContain('latest_snapshots');
-      expect(sqlQuery).toContain('delta_pnl');
-      expect(sqlQuery).toContain('end_total_pnl::numeric - COALESCE(es.start_total_pnl::numeric, 0)');
-      expect(sqlQuery).toContain('as delta_total_pnl');
+      expect(result).toHaveLength(2);
+      // 0xLoser has higher perpWeek PnL (15000 > 8000), so ranked first
+      expect(result[0]!.address).toBe('0xLoser');
+      expect(result[0]!.total_pnl).toBe('15000');
+      expect(result[0]!.data_source).toBe('hyperliquid_portfolio');
+      expect(result[1]!.address).toBe('0xWinner');
+      expect(result[1]!.total_pnl).toBe('8000');
+      expect(result[1]!.trade_count).toBe(50);
     });
 
-    it('should use correct time boundaries for 1d, 7d, 30d', async () => {
+    it('should use correct portfolio period for each timeframe', async () => {
+      vi.mocked(query)
+        .mockResolvedValue({ rows: [
+          { trader_id: 1, address: '0xT', first_seen_at: '2026-01-01', delta_pnl: '100' },
+        ], rowCount: 1 });
+
+      vi.mocked(fetchPortfolio).mockReturnValue(mockPortfolio('1000', '7000', '28000', '99000'));
+
+      const r1d = await getLeaderboard('1d', 'total_pnl', 10);
+      expect(r1d[0]!.total_pnl).toBe('1000'); // perpDay
+
+      const r7d = await getLeaderboard('7d', 'total_pnl', 10);
+      expect(r7d[0]!.total_pnl).toBe('7000'); // perpWeek
+
+      const r30d = await getLeaderboard('30d', 'total_pnl', 10);
+      expect(r30d[0]!.total_pnl).toBe('28000'); // perpMonth
+    });
+
+    it('should fall back to snapshot delta when portfolio fetch fails', async () => {
+      vi.mocked(query)
+        .mockResolvedValueOnce({
+          rows: [{ trader_id: 1, address: '0xDown', first_seen_at: '2026-02-20', delta_pnl: '999' }],
+          rowCount: 1,
+        })
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 });
+
+      vi.mocked(fetchPortfolio).mockReturnValue(throwError(() => new Error('429')));
+
+      const result = await getLeaderboard('7d', 'total_pnl', 10);
+
+      expect(result).toHaveLength(1);
+      expect(result[0]!.total_pnl).toBe('999');
+      expect(result[0]!.data_source).toBe('snapshot_delta');
+      expect(result[0]!.timeframe_coverage).toBe('partial');
+    });
+
+    it('should return empty for no candidates', async () => {
       vi.mocked(query).mockResolvedValue({ rows: [], rowCount: 0 });
 
-      const timeframes = ['1d', '7d', '30d'] as const;
-      const expectedDays = [1, 7, 30];
-
-      for (let i = 0; i < timeframes.length; i++) {
-        vi.clearAllMocks();
-        const before = Date.now();
-
-        await getLeaderboard(timeframes[i]!, 'total_pnl', 50);
-
-        const [, params] = vi.mocked(query).mock.calls[0]!;
-        const since = params![0] as Date;
-        const expectedMs = expectedDays[i]! * 24 * 60 * 60 * 1000;
-
-        // Check that since is approximately (expectedDays ago ± 1 second)
-        const actualDiff = before - since.getTime();
-        expect(actualDiff).toBeGreaterThan(expectedMs - 1000);
-        expect(actualDiff).toBeLessThan(expectedMs + 1000);
-      }
+      const result = await getLeaderboard('7d', 'total_pnl', 10);
+      expect(result).toHaveLength(0);
     });
 
-    it('should order by delta_volume when metric is volume', async () => {
-      vi.mocked(query).mockResolvedValue({ rows: [], rowCount: 0 });
+    it('should mark coverage as full when tracking started before timeframe', async () => {
+      const thirtyOneDaysAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+      vi.mocked(query)
+        .mockResolvedValueOnce({
+          rows: [{ trader_id: 1, address: '0xOld', first_seen_at: thirtyOneDaysAgo, delta_pnl: '100' }],
+          rowCount: 1,
+        })
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 });
 
-      await getLeaderboard('7d', 'volume', 50);
+      vi.mocked(fetchPortfolio).mockReturnValue(mockPortfolio('500', '3000', '12000', '50000'));
 
-      const [sqlQuery] = vi.mocked(query).mock.calls[0]!;
-      expect(sqlQuery).toContain('ORDER BY dp.delta_volume DESC');
+      const result = await getLeaderboard('30d', 'total_pnl', 10);
+      expect(result[0]!.timeframe_coverage).toBe('full');
     });
 
-    it('should order by delta_realized_pnl when metric is realized_pnl', async () => {
-      vi.mocked(query).mockResolvedValue({ rows: [], rowCount: 0 });
+    it('should mark coverage as partial when tracking started within timeframe', async () => {
+      const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+      vi.mocked(query)
+        .mockResolvedValueOnce({
+          rows: [{ trader_id: 1, address: '0xNew', first_seen_at: twoDaysAgo, delta_pnl: '100' }],
+          rowCount: 1,
+        })
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 });
 
-      await getLeaderboard('7d', 'realized_pnl', 50);
+      vi.mocked(fetchPortfolio).mockReturnValue(mockPortfolio('500', '3000', '12000', '50000'));
 
-      const [sqlQuery] = vi.mocked(query).mock.calls[0]!;
-      expect(sqlQuery).toContain('ORDER BY dp.delta_realized_pnl DESC');
-    });
-
-    it('should calculate negative delta for traders who lost money', async () => {
-      // Simulates a scenario where trader had +1000 at start, -500 at end = delta -1500
-      const mockRows = [
-        {
-          rank: 1,
-          address: '0xLoser',
-          trader_id: 1,
-          total_pnl: '-1500.00', // This is the delta: end(-500) - start(+1000)
-          realized_pnl: '-1200.00',
-          unrealized_pnl: '-300.00',
-          volume: '5000.00',
-          trade_count: 0,
-          tracking_since: '2026-01-01',
-          data_source: 'calculated',
-        },
-      ];
-
-      vi.mocked(query).mockResolvedValue({ rows: mockRows, rowCount: 1 });
-
-      const result = await getLeaderboard('7d', 'total_pnl', 50);
-
-      expect(result[0]!.total_pnl).toBe('-1500.00');
+      const result = await getLeaderboard('30d', 'total_pnl', 10);
+      expect(result[0]!.timeframe_coverage).toBe('partial');
     });
   });
 
-  describe('getTraderRank', () => {
-    it('should use delta calculation for trader rank', async () => {
-      vi.mocked(query).mockResolvedValue({ rows: [{ rank: 5 }], rowCount: 1 });
+  describe('getAllTimeLeaderboard', () => {
+    it('should fetch portfolio and rank by allTime PnL', async () => {
+      vi.mocked(query).mockResolvedValueOnce({
+        rows: [
+          { id: 1, address: '0xA', first_seen_at: '2026-01-01' },
+          { id: 2, address: '0xB', first_seen_at: '2026-01-01' },
+        ],
+        rowCount: 2,
+      });
 
-      const rank = await getTraderRank(123, '7d', 'total_pnl');
+      vi.mocked(fetchPortfolio).mockImplementation((address: string) => {
+        if (address === '0xA') return mockPortfolio('100', '700', '2800', '50000');
+        return mockPortfolio('200', '1400', '5600', '80000');
+      });
 
-      expect(rank).toBe(5);
+      const result = await getAllTimeLeaderboard(10);
 
-      const [sqlQuery] = vi.mocked(query).mock.calls[0]!;
-
-      // Verify SQL contains delta calculation logic
-      expect(sqlQuery).toContain('earliest_snapshots');
-      expect(sqlQuery).toContain('latest_snapshots');
-      expect(sqlQuery).toContain('delta_pnl');
-      expect(sqlQuery).toContain('delta_total_pnl');
-    });
-
-    it('should return null when trader has no rank', async () => {
-      vi.mocked(query).mockResolvedValue({ rows: [], rowCount: 0 });
-
-      const rank = await getTraderRank(999, '7d', 'total_pnl');
-
-      expect(rank).toBeNull();
+      expect(result).toHaveLength(2);
+      expect(result[0]!.address).toBe('0xB');
+      expect(result[0]!.all_time_pnl).toBe('80000');
+      expect(result[1]!.address).toBe('0xA');
+      expect(result[1]!.all_time_pnl).toBe('50000');
     });
   });
 });
