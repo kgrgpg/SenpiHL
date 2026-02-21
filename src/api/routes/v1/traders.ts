@@ -133,10 +133,37 @@ export async function tradersRoutes(fastify: FastifyInstance): Promise<void> {
 
     const summary = await snapshotsRepo.getSummary(trader.id, fromDate, toDate);
     const latestSnapshot = snapshots[snapshots.length - 1];
+    const earliestSnapshot = snapshots[0];
+
+    // Calculate actual data coverage vs requested range
+    const requestedMs = toDate.getTime() - fromDate.getTime();
+    const actualCoverageMs = (earliestSnapshot && latestSnapshot)
+      ? new Date(latestSnapshot.timestamp).getTime() - new Date(earliestSnapshot.timestamp).getTime()
+      : 0;
+    const coveragePercent = requestedMs > 0 ? Math.min(100, Math.round((actualCoverageMs / requestedMs) * 100)) : 0;
+
+    // Build coverage warning if data is incomplete
+    let coverage_warning: string | undefined;
+    if (snapshots.length === 0) {
+      coverage_warning = `No data available for the requested ${timeframe} timeframe. Backfill may still be in progress.`;
+    } else if (coveragePercent < 50) {
+      const actualHours = Math.round(actualCoverageMs / (1000 * 60 * 60));
+      const requestedHours = Math.round(requestedMs / (1000 * 60 * 60));
+      coverage_warning = `Only ${actualHours}h of data available out of ${requestedHours}h requested (${coveragePercent}% coverage). PnL values reflect this shorter period.`;
+    }
 
     return {
       trader: address,
       timeframe,
+      data_coverage: {
+        requested_from: Math.floor(fromDate.getTime() / 1000),
+        requested_to: Math.floor(toDate.getTime() / 1000),
+        actual_from: earliestSnapshot ? Math.floor(new Date(earliestSnapshot.timestamp).getTime() / 1000) : null,
+        actual_to: latestSnapshot ? Math.floor(new Date(latestSnapshot.timestamp).getTime() / 1000) : null,
+        coverage_percent: coveragePercent,
+        data_points: snapshots.length,
+        ...(coverage_warning && { warning: coverage_warning }),
+      },
       data: snapshots.map(s => ({
         timestamp: Math.floor(new Date(s.timestamp).getTime() / 1000),
         realized_pnl: s.realized_pnl,

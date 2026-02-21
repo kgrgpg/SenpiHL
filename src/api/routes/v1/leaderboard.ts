@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 
 import { leaderboardRepo } from '../../../storage/db/repositories/index.js';
 import { cacheGet, cacheSet } from '../../../storage/cache/redis.js';
+import { query } from '../../../storage/db/client.js';
 import { logger } from '../../../utils/logger.js';
 
 interface LeaderboardQuery {
@@ -59,23 +60,49 @@ export async function leaderboardRoutes(fastify: FastifyInstance): Promise<void>
     } else {
       const entries = await leaderboardRepo.get(timeframe, metric, limitNum);
 
+      // Check actual data coverage for the requested timeframe
+      const days = timeframe === '1d' ? 1 : timeframe === '7d' ? 7 : 30;
+      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      const rangeResult = await query<{ oldest: Date; newest: Date }>(
+        `SELECT MIN(timestamp) as oldest, MAX(timestamp) as newest
+         FROM pnl_snapshots
+         WHERE timestamp >= $1
+           AND NOT (total_pnl = 0 AND realized_pnl = 0 AND unrealized_pnl = 0)`,
+        [since]
+      );
+
+      const oldest = rangeResult.rows[0]?.oldest;
+      const newest = rangeResult.rows[0]?.newest;
+      const actualSpanMs = oldest && newest ? new Date(newest).getTime() - new Date(oldest).getTime() : 0;
+      const requestedMs = days * 24 * 60 * 60 * 1000;
+      const coveragePercent = requestedMs > 0 ? Math.min(100, Math.round((actualSpanMs / requestedMs) * 100)) : 0;
+
+      let coverageWarning: string | undefined;
+      if (coveragePercent < 50) {
+        const actualHours = Math.round(actualSpanMs / (1000 * 60 * 60));
+        coverageWarning = `Data covers ${actualHours}h of the requested ${days * 24}h (${coveragePercent}%). Rankings reflect this shorter period. Full coverage requires ${days}+ days of continuous collection.`;
+      }
+
       response = {
         timeframe,
         metric,
-        description: `${timeframe} PnL calculated from our tracked data`,
+        data_coverage: {
+          requested_hours: days * 24,
+          actual_hours: Math.round(actualSpanMs / (1000 * 60 * 60)),
+          coverage_percent: coveragePercent,
+          ...(coverageWarning && { warning: coverageWarning }),
+        },
         data: entries.map((entry) => ({
           rank: Number(entry.rank),
           address: entry.address,
           total_pnl: entry.total_pnl,
           realized_pnl: entry.realized_pnl,
           unrealized_pnl: entry.unrealized_pnl,
-          volume: entry.volume,
           trade_count: entry.trade_count,
           tracking_since: entry.tracking_since,
           data_source: entry.data_source,
         })),
         updated_at: Math.floor(Date.now() / 1000),
-        note: `PnL is calculated from data collected since each trader was added to tracking. See tracking_since for coverage start date.`,
       };
     }
 
