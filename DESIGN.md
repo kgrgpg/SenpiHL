@@ -347,12 +347,23 @@ Every PnL response includes an `accuracy` object:
 }
 ```
 
-Levels: `exact` (authoritative), `partial` (realized only), `estimate` (approximate), `unavailable`.
+### Data Integrity and Gap Detection
+
+On startup, the gap detector (`src/state/gap-detector.ts`) scans all tracked traders:
+1. Finds each trader's last snapshot timestamp
+2. If the gap between that and now exceeds 10 minutes, records it in `data_gaps`
+3. Gaps are surfaced in every PnL response via `data_status.known_gaps`
+
+Recovery strategy:
+- Gaps are **NOT auto-backfilled** (too expensive for 1000+ traders)
+- The `/v1/backfill` endpoint can be used to manually trigger backfill for critical traders
+- For custom time range PnL: if gaps overlap the range, the response warns the consumer
+- Resolved gaps are marked with `resolved_at` timestamp
 
 ### Data Completeness Over Time
 
 The longer the system runs, the more complete the data:
-- **Day 1**: Standard timeframes only (via portfolio API), real-time fills for all tracked traders on top 15 coins
+- **Day 1**: Standard timeframes from portfolio API, real-time fills for tracked traders on top 8 coins
 - **Day 7**: Custom ranges within last 7 days (from stored fills + snapshots)
 - **Day 30+**: Near-complete history for all tracked traders
 - **Real-time**: All fills captured via coin-level WS trades for ALL tracked traders (not limited to 10)

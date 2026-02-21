@@ -8,6 +8,7 @@ import { getTrackedTraderCount, getAllTrackedAddresses } from '../../../state/tr
 import { query } from '../../../storage/db/client.js';
 import { rateBudget } from '../../../utils/rate-budget.js';
 import { getPriceCount } from '../../../state/price-service.js';
+import { getGapStats } from '../../../state/gap-detector.js';
 
 export async function statusRoutes(fastify: FastifyInstance): Promise<void> {
   /**
@@ -54,6 +55,7 @@ export async function statusRoutes(fastify: FastifyInstance): Promise<void> {
       price_service: {
         coins_tracked: getPriceCount(),
       },
+      data_integrity: await getGapStats(),
       rate_budget: rateBudget.getStats(),
       config: {
         poll_interval_ms: config.POLL_INTERVAL_MS,

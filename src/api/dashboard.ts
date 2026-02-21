@@ -36,7 +36,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
       <div class="flex items-center gap-3">
         <h1 class="text-lg font-bold text-white">PnL Indexer</h1>
-        <span class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">v1.2.0</span>
+        <span class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">v1.3.0</span>
       </div>
       <div class="flex items-center gap-4">
         <nav class="flex gap-1">
@@ -98,6 +98,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
                 <th class="text-left px-4 py-2 w-12">#</th>
                 <th class="text-left px-4 py-2">Address</th>
                 <th class="text-right px-4 py-2">Delta PnL</th>
+                <th class="text-right px-4 py-2 w-10">Src</th>
               </tr>
             </thead>
             <tbody>
@@ -105,11 +106,17 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
                 <tr class="border-b border-slate-800/50 hover:bg-slate-800/40 cursor-pointer transition" @click="viewTrader(entry.address)">
                   <td class="px-4 py-2.5 text-slate-500 font-mono text-xs" x-text="entry.rank"></td>
                   <td class="px-4 py-2.5 font-mono text-xs text-slate-300" x-text="entry.address.slice(0,6) + '...' + entry.address.slice(-4)"></td>
-                  <td class="px-4 py-2.5 text-right font-mono text-xs" :class="parseFloat(entry.total_pnl) >= 0 ? 'text-emerald-400' : 'text-red-400'" x-text="'$' + fmtPnl(entry.total_pnl)"></td>
+                  <td class="px-4 py-2.5 text-right font-mono text-xs" :class="parseFloat(entry.total_pnl) >= 0 ? 'text-emerald-400' : 'text-red-400'" x-text="'$' + fmtPnl(entry.total_pnl)">
+                  </td>
+                  <td class="px-4 py-2.5 text-right">
+                    <span class="text-[9px] px-1 py-0.5 rounded"
+                      :class="entry.data_source === 'hyperliquid_portfolio' ? 'bg-emerald-950 text-emerald-400' : 'bg-amber-950 text-amber-400'"
+                      x-text="entry.data_source === 'hyperliquid_portfolio' ? 'HL' : 'est'"></span>
+                  </td>
                 </tr>
               </template>
               <tr x-show="leaderboard.length === 0">
-                <td colspan="3" class="px-4 py-8 text-center text-slate-600">Loading...</td>
+                <td colspan="4" class="px-4 py-8 text-center text-slate-600">Loading...</td>
               </tr>
             </tbody>
           </table>
@@ -140,36 +147,37 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
             </div>
             <div class="bg-slate-900 border border-slate-800 rounded-lg p-4">
               <div class="text-xs text-slate-500 mb-1">Realized</div>
-              <div class="text-xl font-bold text-white" x-text="'$' + fmtPnl(traderData.summary.realized_pnl || '0')"></div>
+              <div class="text-xl font-bold text-white" x-text="traderData.summary.realized_pnl != null ? '$' + fmtPnl(traderData.summary.realized_pnl) : '--'"></div>
+              <div x-show="traderData.summary.realized_pnl == null" class="text-xs text-slate-600 mt-0.5">No fills captured</div>
             </div>
             <div class="bg-slate-900 border border-slate-800 rounded-lg p-4">
               <div class="text-xs text-slate-500 mb-1">Unrealized</div>
-              <div class="text-xl font-bold" :class="parseFloat(traderData.summary.unrealized_pnl || '0') >= 0 ? 'text-emerald-400' : 'text-red-400'" x-text="'$' + fmtPnl(traderData.summary.unrealized_pnl || '0')"></div>
+              <div class="text-xl font-bold" :class="parseFloat(traderData.summary.unrealized_pnl || '0') >= 0 ? 'text-emerald-400' : 'text-red-400'" x-text="traderData.summary.unrealized_pnl != null ? '$' + fmtPnl(traderData.summary.unrealized_pnl) : '--'"></div>
             </div>
             <div class="bg-slate-900 border border-slate-800 rounded-lg p-4">
-              <div class="text-xs text-slate-500 mb-1">Trades</div>
-              <div class="text-xl font-bold text-white" x-text="(traderData.summary.trade_count || 0).toLocaleString()"></div>
+              <div class="text-xs text-slate-500 mb-1">Peak PnL</div>
+              <div class="text-xl font-bold text-white" x-text="'$' + fmtPnl(traderData.summary.peak_pnl || '0')"></div>
             </div>
             <div class="bg-slate-900 border border-slate-800 rounded-lg p-4">
-              <div class="text-xs text-slate-500 mb-1">Volume</div>
-              <div class="text-xl font-bold text-white" x-text="'$' + fmtPnl(traderData.summary.volume || '0')"></div>
+              <div class="text-xs text-slate-500 mb-1">Max Drawdown</div>
+              <div class="text-xl font-bold text-red-400" x-text="'$' + fmtPnl(traderData.summary.max_drawdown || '0')"></div>
             </div>
           </div>
 
-          <!-- Accuracy info -->
-          <div x-show="traderData.accuracy" class="mb-4 bg-slate-800/50 rounded-lg px-3 py-2 text-xs text-slate-500 space-y-1">
-            <div class="flex gap-3">
-              <span>Total PnL:
-                <span :class="traderData.accuracy?.total_pnl?.level === 'exact' ? 'text-emerald-400' : 'text-amber-400'" x-text="traderData.accuracy?.total_pnl?.level"></span>
-              </span>
-              <span>Realized:
-                <span class="text-emerald-400" x-text="traderData.accuracy?.realized_pnl?.level"></span>
-              </span>
-              <span>Unrealized:
-                <span :class="traderData.accuracy?.unrealized_pnl?.level === 'exact' ? 'text-emerald-400' : 'text-amber-400'" x-text="traderData.accuracy?.unrealized_pnl?.level"></span>
-              </span>
+          <!-- Data source + tracking info -->
+          <div x-show="traderData.data_status" class="mb-4 bg-slate-800/50 rounded-lg px-3 py-2 text-xs space-y-1">
+            <div class="flex items-center gap-2">
+              <span class="px-1.5 py-0.5 rounded text-[10px] font-medium"
+                :class="traderData.data_status?.pnl_source === 'hyperliquid_portfolio' ? 'bg-emerald-900 text-emerald-300' : 'bg-amber-900 text-amber-300'"
+                x-text="traderData.data_status?.pnl_source === 'hyperliquid_portfolio' ? 'HL Portfolio' : 'Our Data'"></span>
+              <span class="text-slate-500" x-text="traderData.data_status?.note"></span>
             </div>
-            <div class="text-slate-600" x-text="traderData.accuracy?.realized_pnl?.source"></div>
+            <div class="flex gap-4 text-slate-600">
+              <span x-text="'Tracking since: ' + (traderData.data_status?.tracking_since ? new Date(traderData.data_status.tracking_since).toLocaleDateString() : 'N/A')"></span>
+              <span x-text="(traderData.data_status?.fills_in_range || 0) + ' fills'"></span>
+              <span x-text="(traderData.data_status?.snapshots_in_range || 0) + ' snapshots'"></span>
+              <span x-show="traderData.data_status?.known_gaps?.length > 0" class="text-amber-500" x-text="traderData.data_status?.known_gaps?.length + ' data gap(s)'"></span>
+            </div>
           </div>
 
           <!-- Chart -->

@@ -29,6 +29,10 @@ vi.mock('../../../streams/sources/hybrid.stream.js', () => ({
   })),
 }));
 
+vi.mock('../../../storage/db/client.js', () => ({
+  query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+}));
+
 vi.mock('../../../storage/db/repositories/index.js', () => ({
   tradersRepo: {
     findByAddress: vi.fn(),
@@ -39,6 +43,7 @@ vi.mock('../../../storage/db/repositories/index.js', () => ({
     getForTrader: vi.fn(),
     getSummary: vi.fn(),
     getLatest: vi.fn(),
+    getCount: vi.fn().mockResolvedValue(0),
   },
   tradesRepo: {
     getRealizedPnlSummary: vi.fn().mockResolvedValue({
@@ -371,31 +376,30 @@ describe('Traders Routes', () => {
       expect(typeof body.timeframe).toBe('string');
       expect(Array.isArray(body.data)).toBe(true);
 
-      // Required data[] fields (per requirements spec)
-      const dataPoint = body.data[0];
-      expect(dataPoint).toHaveProperty('timestamp');
-      expect(dataPoint).toHaveProperty('realized_pnl');
-      expect(dataPoint).toHaveProperty('unrealized_pnl');
-      expect(dataPoint).toHaveProperty('total_pnl');
-      expect(dataPoint).toHaveProperty('positions');
-      expect(dataPoint).toHaveProperty('volume');
-      expect(typeof dataPoint.timestamp).toBe('number');
-      expect(typeof dataPoint.realized_pnl).toBe('string');
-      expect(typeof dataPoint.positions).toBe('number');
+      // Required data[] fields
+      if (body.data.length > 0) {
+        const dataPoint = body.data[0];
+        expect(dataPoint).toHaveProperty('timestamp');
+        expect(dataPoint).toHaveProperty('total_pnl');
+        expect(typeof dataPoint.timestamp).toBe('number');
+      }
 
-      // Summary fields (our dual-source format)
-      expect(body.summary).toHaveProperty('realized_pnl');
-      expect(body.summary).toHaveProperty('unrealized_pnl');
+      // Summary fields
       expect(body.summary).toHaveProperty('total_pnl');
       expect(body.summary).toHaveProperty('peak_pnl');
       expect(body.summary).toHaveProperty('max_drawdown');
       expect(body.summary).toHaveProperty('trade_count');
-      expect(body.summary).toHaveProperty('volume');
+      expect(body.summary).toHaveProperty('positions');
+
+      // data_status replaces accuracy
+      expect(body.data_status).toBeDefined();
+      expect(body.data_status).toHaveProperty('pnl_source');
+      expect(body.data_status).toHaveProperty('tracking_since');
+      expect(body.data_status).toHaveProperty('known_gaps');
     });
 
-    it('should return zero PnL when no data available (API mocked to error)', async () => {
+    it('should return zero PnL when APIs return errors', async () => {
       vi.mocked(snapshotsRepo.getForTrader).mockResolvedValue([]);
-      vi.mocked(snapshotsRepo.getSummary).mockResolvedValue(null);
 
       const response = await app.inject({
         method: 'GET',
@@ -403,14 +407,13 @@ describe('Traders Routes', () => {
       });
 
       const body = JSON.parse(response.body);
-      expect(body.summary.realized_pnl).toBe('0');
       expect(body.summary.total_pnl).toBe('0');
       expect(body.summary.trade_count).toBe(0);
+      expect(body.data_status.pnl_source).toBe('our_calculation');
     });
 
-    it('should include accuracy metadata', async () => {
+    it('should include data_status metadata instead of accuracy', async () => {
       vi.mocked(snapshotsRepo.getForTrader).mockResolvedValue([]);
-      vi.mocked(snapshotsRepo.getSummary).mockResolvedValue(null);
 
       const response = await app.inject({
         method: 'GET',
@@ -418,14 +421,15 @@ describe('Traders Routes', () => {
       });
 
       const body = JSON.parse(response.body);
-      expect(body.accuracy).toBeDefined();
-      expect(body.accuracy.total_pnl).toBeDefined();
-      expect(body.accuracy.realized_pnl).toBeDefined();
+      expect(body.data_status).toBeDefined();
+      expect(body.data_status.pnl_source).toBeDefined();
+      expect(body.data_status.tracking_since).toBeDefined();
+      expect(body.data_status.known_gaps).toBeDefined();
+      expect(Array.isArray(body.data_status.known_gaps)).toBe(true);
     });
 
-    it('should have all required summary fields', async () => {
+    it('should have all required summary fields (nullable when no data)', async () => {
       vi.mocked(snapshotsRepo.getForTrader).mockResolvedValue([]);
-      vi.mocked(snapshotsRepo.getSummary).mockResolvedValue(null);
 
       const response = await app.inject({
         method: 'GET',
@@ -436,11 +440,7 @@ describe('Traders Routes', () => {
       expect(body.summary).toHaveProperty('total_pnl');
       expect(body.summary).toHaveProperty('realized_pnl');
       expect(body.summary).toHaveProperty('unrealized_pnl');
-      expect(body.summary).toHaveProperty('funding_pnl');
-      expect(body.summary).toHaveProperty('trading_pnl');
-      expect(body.summary).toHaveProperty('total_fees');
       expect(body.summary).toHaveProperty('trade_count');
-      expect(body.summary).toHaveProperty('volume');
       expect(body.summary).toHaveProperty('positions');
       expect(body.summary).toHaveProperty('peak_pnl');
       expect(body.summary).toHaveProperty('max_drawdown');

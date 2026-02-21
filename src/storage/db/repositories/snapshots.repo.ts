@@ -174,10 +174,20 @@ export async function getPnLSummary(
   };
 }
 
+export async function getSnapshotCount(traderId: number, from: Date, to: Date): Promise<number> {
+  const result = await query<{ count: string }>(
+    `SELECT COUNT(*)::text as count FROM pnl_snapshots
+     WHERE trader_id = $1 AND timestamp >= $2 AND timestamp <= $3`,
+    [traderId, from, to]
+  );
+  return parseInt(result.rows[0]?.count ?? '0');
+}
+
 export const snapshotsRepo = {
   insert: insertSnapshot,
   insertMany: insertSnapshots,
   getForTrader: getSnapshotsForTrader,
   getLatest: getLatestSnapshot,
   getSummary: getPnLSummary,
+  getCount: getSnapshotCount,
 };

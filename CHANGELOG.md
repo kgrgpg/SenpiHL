@@ -4,6 +4,37 @@ All notable changes to the PnL Indexer project.
 
 ---
 
+## [1.3.0] - 2026-02-21
+
+### PnL Accuracy, Data Integrity, and Gap Detection
+
+#### Fixed: Leaderboard-Trader Consistency
+- Leaderboard and trader endpoint now both use Hyperliquid's `portfolio` API as the single source of truth for total PnL
+- Trader PnL shows `null` for realized/unrealized breakdown when data is unavailable (instead of misleading zeros)
+- Data source clearly labeled: `hyperliquid_portfolio` or `our_calculation`
+
+#### Added: data_status in every PnL response
+Every trader PnL response now includes a `data_status` object with:
+- `pnl_source`: where the total PnL number came from
+- `tracking_covers_timeframe`: whether our tracking spans the full requested window
+- `fills_in_range` / `snapshots_in_range`: how much data we have
+- `known_gaps`: array of data gaps detected from downtime
+- `note`: human-readable explanation
+
+#### Added: Gap Detection (`src/state/gap-detector.ts`)
+- On startup: detects snapshot gaps for all tracked traders (compares last snapshot time vs now)
+- Records gaps in `data_gaps` table (schema existed, now actively used)
+- Exposes gap stats in `/v1/status` under `data_integrity`
+- Gaps surfaced in trader PnL responses under `data_status.known_gaps`
+
+#### Changed: Dashboard UI
+- Shows data source badge (green "HL Portfolio" / amber "est") on leaderboard entries
+- Trader view shows `data_status`: tracking since, fills count, snapshot count, gap warnings
+- `null` breakdowns show "--" instead of "$0" (honest about missing data)
+- Replaced accuracy metadata with data_status metadata
+
+---
+
 ## [1.2.1] - 2026-02-21
 
 ### Bug Fix: Buyer/Seller Mapping + Comprehensive Test Coverage

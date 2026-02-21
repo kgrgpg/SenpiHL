@@ -299,6 +299,13 @@ async function bootstrapHybridMode(): Promise<void> {
 
   logger.info('Hybrid data pipeline started');
 
+  // Detect data gaps from downtime
+  const { detectStartupGaps } = await import('./state/gap-detector.js');
+  const gaps = await detectStartupGaps();
+  if (gaps.length > 0) {
+    logger.warn({ gapCount: gaps.length }, 'Snapshot gaps recorded from previous downtime');
+  }
+
   // Start price service (allMids WebSocket - zero weight)
   const { startPriceService } = await import('./state/price-service.js');
   startPriceService();
