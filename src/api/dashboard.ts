@@ -91,12 +91,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
             </template>
           </div>
         </div>
-        <div x-show="lbCoverage && lbCoverage.warning" class="px-4 py-2 bg-amber-900/30 border-b border-amber-800/50">
-          <span class="text-xs text-amber-400" x-text="lbCoverage?.warning"></span>
-        </div>
-        <div x-show="lbCoverage && !lbCoverage.warning && lbCoverage.coverage_percent < 100" class="px-4 py-2 bg-slate-800/50 border-b border-slate-700/50">
-          <span class="text-xs text-slate-400" x-text="'Data coverage: ' + (lbCoverage?.actual_hours || 0) + 'h of ' + (lbCoverage?.requested_hours || 0) + 'h (' + (lbCoverage?.coverage_percent || 0) + '%)'"></span>
-        </div>
         <div class="overflow-x-auto">
           <table class="w-full text-sm">
             <thead>
@@ -173,10 +167,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
             </div>
           </div>
 
-          <!-- Coverage + Data Points Info -->
-          <div x-show="traderData.data_coverage?.warning" class="mt-2 px-3 py-2 bg-amber-900/30 border border-amber-800/50 rounded text-xs text-amber-400" x-text="traderData.data_coverage?.warning"></div>
-          <div x-show="traderData.note" class="mt-2 px-3 py-2 bg-blue-900/30 border border-blue-800/50 rounded text-xs text-blue-400" x-text="traderData.note"></div>
-          <div class="text-xs text-slate-600 text-right mt-1" x-text="traderData.data.length + ' data points' + (traderData.data_coverage ? ' | ' + traderData.data_coverage.coverage_percent + '% coverage' : '')"></div>
+          <div class="flex items-center justify-between mt-2">
+            <div x-show="traderData.fetched_live" class="text-xs text-violet-400">Fetched live from Hyperliquid</div>
+            <div class="text-xs text-slate-600" x-text="traderData.data.length + ' data points'"></div>
+          </div>
         </div>
       </template>
 
@@ -185,7 +179,11 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <div>Enter a trader address or click one from the leaderboard</div>
       </div>
 
-      <div x-show="traderLoading" class="text-center py-16 text-slate-500">Loading trader data...</div>
+      <div x-show="traderLoading" class="text-center py-16 text-slate-500">
+        <div class="inline-block w-8 h-8 border-2 border-slate-600 border-t-violet-500 rounded-full animate-spin mb-3"></div>
+        <div>Fetching PnL data from Hyperliquid...</div>
+        <div class="text-xs text-slate-600 mt-1">This may take a few seconds for full history</div>
+      </div>
     </div>
 
     <!-- TAB: Live Feed -->
@@ -237,7 +235,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         tab: 'overview',
         status: { connected: false, traders: 0, snapshots: 0, trades: 0, mode: '', discovered: 0 },
         leaderboard: [],
-        lbCoverage: null,
         lbTimeframe: '7d',
         traderAddress: '',
         traderData: null,
@@ -277,7 +274,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
             const res = await fetch('/v1/leaderboard?timeframe=' + this.lbTimeframe + '&limit=15');
             const data = await res.json();
             this.leaderboard = data.data || [];
-            this.lbCoverage = data.data_coverage || null;
           } catch { /* ignore */ }
         },
 

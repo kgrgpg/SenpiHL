@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 
 import { firstValueFrom } from 'rxjs';
 
-import { hyperliquidClient, fetchClearinghouseState, fetchUserFills } from '../../../hyperliquid/client.js';
+import { hyperliquidClient, fetchClearinghouseState, fetchUserFills, fetchUserFunding } from '../../../hyperliquid/client.js';
 import { tradersRepo, snapshotsRepo } from '../../../storage/db/repositories/index.js';
 import { getHybridDataStream } from '../../../streams/sources/hybrid.stream.js';
 import {
@@ -13,8 +13,11 @@ import {
 import { scheduleBackfill, getBackfillStatus } from '../../../jobs/backfill.js';
 import {
   createInitialState,
+  createSnapshot,
   applyTrade,
+  applyFunding,
   parseTradeFromApi,
+  parseFundingFromApi,
   parsePositionFromApi,
   updatePositions,
   calculatePnL,
@@ -119,51 +122,140 @@ export async function tradersRoutes(fastify: FastifyInstance): Promise<void> {
 
     const preferredGranularity = granularity ?? (days > 7 ? 'daily' : days > 1 ? 'hourly' : 'raw');
 
-    // Try preferred granularity first, fall back to raw if aggregate is empty
-    let snapshots = await snapshotsRepo.getForTrader(
-      trader.id,
-      fromDate,
-      toDate,
-      preferredGranularity
-    );
-
+    let snapshots = await snapshotsRepo.getForTrader(trader.id, fromDate, toDate, preferredGranularity);
     if (snapshots.length === 0 && preferredGranularity !== 'raw') {
       snapshots = await snapshotsRepo.getForTrader(trader.id, fromDate, toDate, 'raw');
     }
 
+    // Check if stored data is sufficient -- filter out zero-PnL initialization artifacts
+    const validSnapshots = snapshots.filter(s =>
+      !(s.total_pnl === '0.00000000' && s.realized_pnl === '0.00000000' && s.unrealized_pnl === '0.00000000')
+    );
+    const earliestValid = validSnapshots[0];
+    const latestValid = validSnapshots[validSnapshots.length - 1];
+    const requestedMs = toDate.getTime() - fromDate.getTime();
+    const actualMs = (earliestValid && latestValid)
+      ? new Date(latestValid.timestamp).getTime() - new Date(earliestValid.timestamp).getTime()
+      : 0;
+    const coverageOk = validSnapshots.length >= 2 && requestedMs > 0 && actualMs / requestedMs > 0.8;
+
+    if (!coverageOk) {
+      try {
+        logger.info({
+          address, timeframe, days,
+          validSnaps: validSnapshots.length,
+          actualMs, requestedMs,
+          coveragePercent: requestedMs > 0 ? Math.round((actualMs / requestedMs) * 100) : 0,
+        }, 'Insufficient data, fetching inline from Hyperliquid');
+
+        // Stagger the 3 API calls to avoid burst rate-limiting
+        const clearinghouse = await firstValueFrom(fetchClearinghouseState(address));
+        const fills = await firstValueFrom(fetchUserFills(address, fromDate.getTime(), toDate.getTime(), 'user'));
+        const funding = await firstValueFrom(fetchUserFunding(address, fromDate.getTime(), toDate.getTime(), 'user'));
+
+        let state = createInitialState(trader.id, address);
+
+        const allEvents: Array<{ time: number; type: 'fill' | 'funding'; data: unknown }> = [];
+        for (const f of fills) allEvents.push({ time: f.time, type: 'fill', data: f });
+        for (const f of funding) {
+          if (f.coin && f.usdc && f.time) {
+            allEvents.push({ time: f.time, type: 'funding', data: f });
+          }
+        }
+        allEvents.sort((a, b) => a.time - b.time);
+
+        const dataPoints: Array<{
+          timestamp: number;
+          realized_pnl: string;
+          unrealized_pnl: string;
+          total_pnl: string;
+          positions: number;
+          volume: string;
+        }> = [];
+
+        // Process events and create data points at day boundaries
+        let lastDayBucket = 0;
+        for (const event of allEvents) {
+          if (event.type === 'fill') {
+            const f = event.data as { coin: string; side: 'A' | 'B'; sz: string; px: string; closedPnl: string; fee: string; time: number; tid: number; liquidation?: boolean; dir: string; startPosition: string };
+            state = applyTrade(state, parseTradeFromApi(
+              f.coin, f.side, f.sz, f.px, f.closedPnl, f.fee, f.time, f.tid,
+              f.liquidation ?? false, f.dir, f.startPosition
+            ));
+          } else {
+            const f = event.data as { coin: string; fundingRate: string; usdc: string; szi: string; time: number };
+            if (f.fundingRate && f.usdc && f.szi) {
+              state = applyFunding(state, parseFundingFromApi(f.coin, f.fundingRate, f.usdc, f.szi, f.time));
+            }
+          }
+
+          const dayBucket = Math.floor(event.time / (24 * 60 * 60 * 1000));
+          if (dayBucket !== lastDayBucket) {
+            const pnl = calculatePnL(state);
+            dataPoints.push({
+              timestamp: Math.floor(event.time / 1000),
+              realized_pnl: pnl.realizedPnl.toString(),
+              unrealized_pnl: pnl.unrealizedPnl.toString(),
+              total_pnl: pnl.totalPnl.toString(),
+              positions: state.positions.size,
+              volume: state.totalVolume.toString(),
+            });
+            lastDayBucket = dayBucket;
+          }
+        }
+
+        // Add current state as final data point with live positions
+        const positions = clearinghouse.assetPositions.map(ap => {
+          const pos = ap.position;
+          return parsePositionFromApi(
+            pos.coin, pos.szi, pos.entryPx, pos.unrealizedPnl,
+            pos.leverage.value, pos.liquidationPx, pos.marginUsed, pos.leverage.type
+          );
+        });
+        state = updatePositions(state, positions);
+        const finalPnl = calculatePnL(state);
+
+        dataPoints.push({
+          timestamp: Math.floor(Date.now() / 1000),
+          realized_pnl: finalPnl.realizedPnl.toString(),
+          unrealized_pnl: finalPnl.unrealizedPnl.toString(),
+          total_pnl: finalPnl.totalPnl.toString(),
+          positions: positions.length,
+          volume: state.totalVolume.toString(),
+        });
+
+        // Compute summary from computed data points
+        let peakPnl = -Infinity;
+        let troughPnl = Infinity;
+        for (const dp of dataPoints) {
+          const v = parseFloat(dp.total_pnl);
+          if (v > peakPnl) peakPnl = v;
+          if (v < troughPnl) troughPnl = v;
+        }
+
+        return {
+          trader: address,
+          timeframe,
+          data: dataPoints,
+          summary: {
+            total_realized: finalPnl.realizedPnl.toString(),
+            peak_pnl: isFinite(peakPnl) ? peakPnl.toString() : '0',
+            max_drawdown: isFinite(troughPnl) && isFinite(peakPnl) ? (troughPnl - peakPnl).toString() : '0',
+            current_pnl: finalPnl.totalPnl.toString(),
+          },
+          fetched_live: true,
+        };
+      } catch (err) {
+        logger.error({ address, error: (err as Error).message, stack: (err as Error).stack }, 'Inline fetch failed, returning stored data');
+      }
+    }
+
     const summary = await snapshotsRepo.getSummary(trader.id, fromDate, toDate);
     const latestSnapshot = snapshots[snapshots.length - 1];
-    const earliestSnapshot = snapshots[0];
-
-    // Calculate actual data coverage vs requested range
-    const requestedMs = toDate.getTime() - fromDate.getTime();
-    const actualCoverageMs = (earliestSnapshot && latestSnapshot)
-      ? new Date(latestSnapshot.timestamp).getTime() - new Date(earliestSnapshot.timestamp).getTime()
-      : 0;
-    const coveragePercent = requestedMs > 0 ? Math.min(100, Math.round((actualCoverageMs / requestedMs) * 100)) : 0;
-
-    // Build coverage warning if data is incomplete
-    let coverage_warning: string | undefined;
-    if (snapshots.length === 0) {
-      coverage_warning = `No data available for the requested ${timeframe} timeframe. Backfill may still be in progress.`;
-    } else if (coveragePercent < 50) {
-      const actualHours = Math.round(actualCoverageMs / (1000 * 60 * 60));
-      const requestedHours = Math.round(requestedMs / (1000 * 60 * 60));
-      coverage_warning = `Only ${actualHours}h of data available out of ${requestedHours}h requested (${coveragePercent}% coverage). PnL values reflect this shorter period.`;
-    }
 
     return {
       trader: address,
       timeframe,
-      data_coverage: {
-        requested_from: Math.floor(fromDate.getTime() / 1000),
-        requested_to: Math.floor(toDate.getTime() / 1000),
-        actual_from: earliestSnapshot ? Math.floor(new Date(earliestSnapshot.timestamp).getTime() / 1000) : null,
-        actual_to: latestSnapshot ? Math.floor(new Date(latestSnapshot.timestamp).getTime() / 1000) : null,
-        coverage_percent: coveragePercent,
-        data_points: snapshots.length,
-        ...(coverage_warning && { warning: coverage_warning }),
-      },
       data: snapshots.map(s => ({
         timestamp: Math.floor(new Date(s.timestamp).getTime() / 1000),
         realized_pnl: s.realized_pnl,
