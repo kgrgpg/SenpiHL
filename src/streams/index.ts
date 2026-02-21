@@ -125,9 +125,12 @@ function processFillsUpdate(update: FillsUpdate): SnapshotData | null {
   }
 
   if (tradesToPersist.length > 0) {
-    tradesRepo.insertMany(tradesToPersist).catch(err =>
-      logger.warn({ err: (err as Error).message }, 'Failed to persist trades')
-    );
+    from(tradesRepo.insertMany(tradesToPersist)).pipe(
+      catchError(err => {
+        logger.warn({ err: (err as Error).message }, 'Failed to persist trades');
+        return EMPTY;
+      })
+    ).subscribe();
   }
 
   traderStates.set(update.address, state);

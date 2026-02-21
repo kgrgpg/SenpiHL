@@ -1,4 +1,5 @@
-import { firstValueFrom } from 'rxjs';
+import { firstValueFrom, forkJoin, from, of, timer } from 'rxjs';
+import { map, catchError, mergeMap, toArray } from 'rxjs/operators';
 
 import { fetchPortfolio } from '../../../hyperliquid/client.js';
 import type { HyperliquidPortfolio } from '../../../hyperliquid/types.js';
@@ -143,44 +144,39 @@ export async function getAllTimeLeaderboard(
     portfolio: HyperliquidPortfolio | null;
   }> = [];
 
-  const BATCH_SIZE = 10;
   const traders = tradersResult.rows;
 
-  for (let i = 0; i < traders.length; i += BATCH_SIZE) {
-    const batch = traders.slice(i, i + BATCH_SIZE);
-
-    const batchResults = await Promise.all(
-      batch.map(async (trader) => {
-        try {
-          const portfolio = await firstValueFrom(fetchPortfolio(trader.address));
-          return {
+  // Fetch portfolios using forkJoin for parallel batch processing
+  const results = await firstValueFrom(
+    from(traders).pipe(
+      mergeMap(
+        (trader) => fetchPortfolio(trader.address).pipe(
+          map(portfolio => ({
             trader_id: trader.id,
             address: trader.address,
             tracking_since: trader.first_seen_at,
-            portfolio,
-          };
-        } catch (err) {
-          logger.warn(
-            { address: trader.address, error: (err as Error).message },
-            'Failed to fetch portfolio for leaderboard'
-          );
-          return {
-            trader_id: trader.id,
-            address: trader.address,
-            tracking_since: trader.first_seen_at,
-            portfolio: null,
-          };
-        }
-      })
-    );
+            portfolio: portfolio as HyperliquidPortfolio | null,
+          })),
+          catchError(err => {
+            logger.warn(
+              { address: trader.address, error: (err as Error).message },
+              'Failed to fetch portfolio for leaderboard'
+            );
+            return of({
+              trader_id: trader.id,
+              address: trader.address,
+              tracking_since: trader.first_seen_at,
+              portfolio: null as HyperliquidPortfolio | null,
+            });
+          })
+        ),
+        10 // concurrency limit: 10 parallel fetches
+      ),
+      toArray()
+    )
+  );
 
-    portfolioData.push(...batchResults);
-
-    // Small delay between batches
-    if (i + BATCH_SIZE < traders.length) {
-      await sleep(100);
-    }
-  }
+  portfolioData.push(...results);
 
   // Extract PnL from portfolio data and rank
   const leaderboardData = portfolioData
@@ -279,10 +275,6 @@ export async function getTraderRank(
   );
 
   return result.rows[0]?.rank ?? null;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export const leaderboardRepo = {

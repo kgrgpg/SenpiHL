@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 import { pool, query } from './client.js';
+import { logger } from '../../utils/logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,14 +23,14 @@ async function markMigrationApplied(version: string): Promise<void> {
 }
 
 async function runMigration(filename: string, sql: string): Promise<void> {
-  console.log(`Running migration: ${filename}`);
+  logger.info({ filename }, 'Running migration');
   await query(sql);
   await markMigrationApplied(filename);
-  console.log(`✓ Migration ${filename} applied successfully`);
+  logger.info({ filename }, 'Migration applied successfully');
 }
 
 async function migrate(): Promise<void> {
-  console.log('Starting database migrations...');
+  logger.info('Starting database migrations...');
 
   const appliedMigrations = await getAppliedMigrations();
 
@@ -40,7 +41,7 @@ async function migrate(): Promise<void> {
 
   for (const filename of migrationFiles) {
     if (appliedMigrations.has(filename)) {
-      console.log(`Skipping ${filename} (already applied)`);
+      logger.debug({ filename }, 'Skipping (already applied)');
       continue;
     }
 
@@ -50,18 +51,18 @@ async function migrate(): Promise<void> {
     try {
       await runMigration(filename, sql);
     } catch (error) {
-      console.error(`✗ Migration ${filename} failed:`, error);
+      logger.error({ filename, error: (error as Error).message }, 'Migration failed');
       throw error;
     }
   }
 
-  console.log('All migrations completed successfully');
+  logger.info('All migrations completed successfully');
 }
 
 migrate()
   .then(() => process.exit(0))
   .catch(error => {
-    console.error('Migration failed:', error);
+    logger.error({ error: error.message }, 'Migration failed');
     process.exit(1);
   })
   .finally(() => pool.end());

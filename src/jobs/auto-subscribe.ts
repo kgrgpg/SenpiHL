@@ -11,7 +11,7 @@
  * - MIN_PRIORITY: Only process traders above this priority
  */
 
-import { Observable, from, of, EMPTY, timer } from 'rxjs';
+import { Observable, from, of, EMPTY, forkJoin } from 'rxjs';
 import {
   mergeMap,
   map,
@@ -223,71 +223,27 @@ export function processDiscoveryQueue$(): Observable<ProcessStats> {
 }
 
 /**
- * Process the discovery queue (Promise-based wrapper for backwards compatibility)
- * @deprecated Use processDiscoveryQueue$() for reactive code
- */
-export async function processDiscoveryQueue(): Promise<ProcessStats> {
-  const { firstValueFrom } = await import('rxjs');
-  return firstValueFrom(processDiscoveryQueue$());
-}
-
-/**
- * Get queue statistics (returns Observable)
+ * Get queue statistics (returns Observable using forkJoin)
  */
 export function getQueueStats$(): Observable<{
   pending: number;
   processedToday: number;
   totalDiscovered: number;
 }> {
-  return from(
-    Promise.all([
-      query<{ count: string }>(
-        'SELECT COUNT(*) as count FROM trader_discovery_queue WHERE processed_at IS NULL'
-      ),
-      query<{ count: string }>(
-        `SELECT COUNT(*) as count FROM trader_discovery_queue 
-         WHERE processed_at >= NOW() - INTERVAL '24 hours'`
-      ),
-      query<{ count: string }>('SELECT COUNT(*) as count FROM trader_discovery_queue'),
-    ])
-  ).pipe(
-    map(([pending, processedToday, total]) => ({
+  return forkJoin({
+    pending: from(query<{ count: string }>(
+      'SELECT COUNT(*) as count FROM trader_discovery_queue WHERE processed_at IS NULL'
+    )),
+    processedToday: from(query<{ count: string }>(
+      `SELECT COUNT(*) as count FROM trader_discovery_queue 
+       WHERE processed_at >= NOW() - INTERVAL '24 hours'`
+    )),
+    total: from(query<{ count: string }>('SELECT COUNT(*) as count FROM trader_discovery_queue')),
+  }).pipe(
+    map(({ pending, processedToday, total }) => ({
       pending: parseInt(pending.rows[0]?.count || '0'),
       processedToday: parseInt(processedToday.rows[0]?.count || '0'),
       totalDiscovered: parseInt(total.rows[0]?.count || '0'),
     }))
   );
-}
-
-/**
- * Get queue statistics (Promise-based wrapper)
- * @deprecated Use getQueueStats$() for reactive code
- */
-export async function getQueueStats(): Promise<{
-  pending: number;
-  processedToday: number;
-  totalDiscovered: number;
-}> {
-  const { firstValueFrom } = await import('rxjs');
-  return firstValueFrom(getQueueStats$());
-}
-
-/**
- * Start periodic processing of the discovery queue
- * @deprecated The main index.ts now uses RxJS interval directly
- */
-export function startAutoSubscribeJob(intervalMs: number = 60000): ReturnType<typeof setInterval> {
-  logger.info({ intervalMs }, 'Starting auto-subscribe job (legacy setInterval)');
-
-  // Run immediately
-  processDiscoveryQueue().catch((err) => {
-    logger.error({ error: err.message }, 'Auto-subscribe job failed');
-  });
-
-  // Then run periodically
-  return setInterval(() => {
-    processDiscoveryQueue().catch((err) => {
-      logger.error({ error: err.message }, 'Auto-subscribe job failed');
-    });
-  }, intervalMs);
 }

@@ -1,4 +1,6 @@
 import RedisModule from 'ioredis';
+import { Observable, from, of } from 'rxjs';
+import { map, catchError } from 'rxjs/operators';
 
 import { config } from '../../utils/config.js';
 import { logger } from '../../utils/logger.js';
@@ -44,6 +46,43 @@ export async function closeRedis(): Promise<void> {
   logger.info('Redis connection closed');
 }
 
+// Observable-based cache operations with built-in error handling
+
+export function cacheGet$<T>(key: string): Observable<T | null> {
+  return from(redis.get(key)).pipe(
+    map(value => value ? JSON.parse(value) as T : null),
+    catchError(err => {
+      logger.warn({ error: (err as Error).message, key }, 'Cache read failed');
+      return of(null);
+    })
+  );
+}
+
+export function cacheSet$(key: string, value: unknown, ttlSeconds?: number): Observable<void> {
+  const serialized = JSON.stringify(value);
+  const op = ttlSeconds
+    ? from(redis.setex(key, ttlSeconds, serialized))
+    : from(redis.set(key, serialized));
+  return op.pipe(
+    map(() => void 0),
+    catchError(err => {
+      logger.warn({ error: (err as Error).message, key }, 'Cache write failed');
+      return of(void 0);
+    })
+  );
+}
+
+export function cacheDelete$(key: string): Observable<void> {
+  return from(redis.del(key)).pipe(
+    map(() => void 0),
+    catchError(err => {
+      logger.warn({ error: (err as Error).message, key }, 'Cache delete failed');
+      return of(void 0);
+    })
+  );
+}
+
+// Promise-based wrappers (for backward compatibility with Fastify handlers)
 export async function cacheGet<T>(key: string): Promise<T | null> {
   const value = await redis.get(key);
   if (!value) return null;
@@ -90,8 +129,11 @@ export const cache = {
   check: checkRedisConnection,
   close: closeRedis,
   get: cacheGet,
+  get$: cacheGet$,
   set: cacheSet,
+  set$: cacheSet$,
   delete: cacheDelete,
+  delete$: cacheDelete$,
   leaderboardAdd,
   leaderboardGetTop,
 };

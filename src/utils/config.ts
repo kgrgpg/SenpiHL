@@ -37,9 +37,10 @@ const envSchema = z.object({
 
 const parseResult = envSchema.safeParse(process.env);
 
+// Using console.error here because logger depends on config (circular dependency)
 if (!parseResult.success && !isTest) {
-  console.error('❌ Invalid environment variables:');
-  console.error(parseResult.error.format());
+  process.stderr.write('Invalid environment variables:\n');
+  process.stderr.write(JSON.stringify(parseResult.error.format(), null, 2) + '\n');
   process.exit(1);
 }
 
