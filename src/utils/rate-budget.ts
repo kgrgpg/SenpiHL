@@ -1,22 +1,22 @@
 /**
  * Adaptive Rate Budget Manager
  *
- * Distributes Hyperliquid API request budget across consumers
- * with priority: user on-demand > polling > backfill.
+ * Probes Hyperliquid's actual rate limit on startup and adapts.
+ * Distributes budget across consumers with priority:
+ *   user on-demand > polling > backfill
  *
- * Targets 80% utilization (960 out of 1200 req/min) to leave
- * headroom for bursts while maximizing backfill throughput.
+ * Targets 80% utilization to leave headroom for bursts.
  */
 
 import { logger } from './logger.js';
 
-const MAX_PER_MINUTE = 1200;
+const DEFAULT_MAX_PER_MINUTE = 1200;
 const TARGET_UTILIZATION = 0.80;
-const TARGET_PER_MINUTE = Math.floor(MAX_PER_MINUTE * TARGET_UTILIZATION); // 960
-const REQUESTS_PER_BACKFILL_WORKER = 120; // ~2 req/chunk, 1s delay, 60 chunks/min
+const REQUESTS_PER_BACKFILL_WORKER = 120;
 const MIN_BACKFILL_WORKERS = 1;
 const MAX_BACKFILL_WORKERS = 10;
 const WINDOW_MS = 60_000;
+const PROBE_INTERVAL_MS = 5 * 60_000; // Re-probe every 5 minutes
 
 export type RequestPriority = 'user' | 'polling' | 'backfill';
 
@@ -27,20 +27,69 @@ interface WindowStats {
 }
 
 class RateBudgetManager {
+  private maxPerMinute = DEFAULT_MAX_PER_MINUTE;
+  private targetPerMinute = Math.floor(DEFAULT_MAX_PER_MINUTE * TARGET_UTILIZATION);
   private windowStart = Date.now();
   private stats: WindowStats = { user: 0, polling: 0, backfill: 0 };
   private previousWindow: WindowStats = { user: 0, polling: 0, backfill: 0 };
+  private probeTimer: ReturnType<typeof setInterval> | null = null;
+  private lastProbeResult: { cap: number; used: number; probedAt: Date } | null = null;
 
   /**
-   * Record a request. Returns true if within budget, false if should throttle.
+   * Probe Hyperliquid for actual rate limit and start periodic re-probing.
    */
+  async initialize(): Promise<void> {
+    await this.probe();
+    this.probeTimer = setInterval(() => this.probe().catch(() => {}), PROBE_INTERVAL_MS);
+  }
+
+  /**
+   * Query Hyperliquid's userRateLimit to discover actual capacity.
+   */
+  private async probe(): Promise<void> {
+    try {
+      const res = await fetch('https://api.hyperliquid.xyz/info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'userRateLimit', user: '0x0000000000000000000000000000000000000000' }),
+      });
+      if (!res.ok) return;
+
+      const data = await res.json() as { nRequestsCap: number; nRequestsUsed: number };
+
+      // nRequestsCap is total capacity per window (not per minute necessarily)
+      // Hyperliquid's window is ~1 minute, cap scales with trading volume
+      // We use a conservative interpretation: treat as per-minute cap
+      // but clamp to a reasonable range (1200 - 10000)
+      const probedCap = Math.min(10000, Math.max(DEFAULT_MAX_PER_MINUTE, data.nRequestsCap));
+
+      if (probedCap !== this.maxPerMinute) {
+        logger.info({
+          previous: this.maxPerMinute,
+          probed: probedCap,
+          rawCap: data.nRequestsCap,
+          used: data.nRequestsUsed,
+        }, 'Rate limit probed from Hyperliquid');
+      }
+
+      this.maxPerMinute = probedCap;
+      this.targetPerMinute = Math.floor(probedCap * TARGET_UTILIZATION);
+      this.lastProbeResult = {
+        cap: data.nRequestsCap,
+        used: data.nRequestsUsed,
+        probedAt: new Date(),
+      };
+    } catch (err) {
+      logger.debug({ error: (err as Error).message }, 'Rate limit probe failed, using current limit');
+    }
+  }
+
   record(priority: RequestPriority): boolean {
     this.rollWindowIfNeeded();
     const total = this.stats.user + this.stats.polling + this.stats.backfill;
 
     if (priority === 'user') {
-      // Users always get through (up to hard limit)
-      if (total < MAX_PER_MINUTE) {
+      if (total < this.maxPerMinute) {
         this.stats.user++;
         return true;
       }
@@ -48,71 +97,70 @@ class RateBudgetManager {
     }
 
     if (priority === 'polling') {
-      // Polling gets through up to target
-      if (total < TARGET_PER_MINUTE) {
+      if (total < this.targetPerMinute) {
         this.stats.polling++;
         return true;
       }
       return false;
     }
 
-    // Backfill: fill remaining budget up to target
     const userAndPolling = this.stats.user + this.stats.polling;
-    if (total < TARGET_PER_MINUTE && (total - userAndPolling) < this.getBackfillBudget()) {
+    if (total < this.targetPerMinute && (total - userAndPolling) < this.getBackfillBudget()) {
       this.stats.backfill++;
       return true;
     }
     return false;
   }
 
-  /**
-   * How many backfill req/min are available to hit the 80% target.
-   */
   getBackfillBudget(): number {
     const window = this.getCurrentOrPreviousStats();
     const nonBackfill = window.user + window.polling;
-    return Math.max(0, TARGET_PER_MINUTE - nonBackfill);
+    return Math.max(0, this.targetPerMinute - nonBackfill);
   }
 
-  /**
-   * Recommended number of concurrent backfill workers.
-   */
   getRecommendedWorkers(): number {
     const budget = this.getBackfillBudget();
     const workers = Math.floor(budget / REQUESTS_PER_BACKFILL_WORKER);
     return Math.max(MIN_BACKFILL_WORKERS, Math.min(MAX_BACKFILL_WORKERS, workers));
   }
 
-  /**
-   * Current window utilization percentage.
-   */
   getUtilization(): number {
     const window = this.getCurrentOrPreviousStats();
     const total = window.user + window.polling + window.backfill;
-    return total / MAX_PER_MINUTE;
+    return total / this.maxPerMinute;
   }
 
-  /**
-   * Get stats for monitoring/dashboard.
-   */
   getStats() {
     const window = this.getCurrentOrPreviousStats();
     const total = window.user + window.polling + window.backfill;
     return {
       windowReqPerMin: total,
-      utilization: Math.round((total / MAX_PER_MINUTE) * 100),
-      target: TARGET_PER_MINUTE,
-      max: MAX_PER_MINUTE,
+      utilization: Math.round((total / this.maxPerMinute) * 100),
+      target: this.targetPerMinute,
+      max: this.maxPerMinute,
       breakdown: { ...window },
       recommendedWorkers: this.getRecommendedWorkers(),
       backfillBudget: this.getBackfillBudget(),
+      ...(this.lastProbeResult && {
+        probe: {
+          hyperliquidCap: this.lastProbeResult.cap,
+          hyperliquidUsed: this.lastProbeResult.used,
+          probedAt: this.lastProbeResult.probedAt.toISOString(),
+        },
+      }),
     };
+  }
+
+  stop(): void {
+    if (this.probeTimer) {
+      clearInterval(this.probeTimer);
+      this.probeTimer = null;
+    }
   }
 
   private getCurrentOrPreviousStats(): WindowStats {
     this.rollWindowIfNeeded();
     const total = this.stats.user + this.stats.polling + this.stats.backfill;
-    // If current window is young (<10s), use previous for better estimate
     if (total === 0 && (this.previousWindow.user + this.previousWindow.polling + this.previousWindow.backfill) > 0) {
       return this.previousWindow;
     }
@@ -127,7 +175,8 @@ class RateBudgetManager {
         logger.debug({
           ...this.stats,
           total,
-          utilization: `${Math.round((total / MAX_PER_MINUTE) * 100)}%`,
+          utilization: `${Math.round((total / this.maxPerMinute) * 100)}%`,
+          max: this.maxPerMinute,
           workers: this.getRecommendedWorkers(),
         }, 'Rate budget window rolled');
       }
