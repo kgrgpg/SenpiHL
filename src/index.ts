@@ -359,10 +359,9 @@ async function bootstrap(): Promise<void> {
   await cache.connect();
   logger.info('Redis connected');
 
-  // Probe actual rate limit from Hyperliquid
+  // Rate budget: 1200 weight/min (official Hyperliquid limit)
   const { rateBudget } = await import('./utils/rate-budget.js');
-  await rateBudget.initialize();
-  logger.info({ max: rateBudget.getStats().max, target: rateBudget.getStats().target }, 'Rate budget initialized');
+  logger.info(rateBudget.getStats(), 'Rate budget initialized (weight-based)');
 
   // Reset shutdown signal
   shutdown$ = new Subject<void>();

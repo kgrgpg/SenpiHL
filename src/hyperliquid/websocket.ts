@@ -79,9 +79,25 @@ export class HyperliquidWebSocket {
   private reconnectAttempts = 0;
   private readonly maxReconnectAttempts = 10;
   private readonly baseReconnectDelay = 1000;
+  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     this.setupAutoReconnect();
+  }
+
+  /**
+   * Count of user-specific WebSocket subscriptions (limit: 10)
+   */
+  get userSubscriptionCount(): number {
+    let count = 0;
+    const seenUsers = new Set<string>();
+    for (const sub of this.subscriptions.values()) {
+      if (sub.user && !seenUsers.has(sub.user.toLowerCase())) {
+        seenUsers.add(sub.user.toLowerCase());
+        count++;
+      }
+    }
+    return count;
   }
 
   /**
@@ -111,11 +127,13 @@ export class HyperliquidWebSocket {
         this.connectionState.next('connected');
         this.reconnectAttempts = 0;
         this.resubscribeAll();
+        this.startHeartbeat();
       });
 
       this.ws.on('message', (data: Buffer) => {
         try {
           const message = JSON.parse(data.toString()) as WebSocketMessage;
+          if (message.channel === 'pong') return; // Filter heartbeat responses
           this.messageSubject.next(message);
         } catch (err) {
           logger.error({ error: (err as Error).message }, 'Failed to parse WebSocket message');
@@ -125,6 +143,7 @@ export class HyperliquidWebSocket {
       this.ws.on('close', (code, reason) => {
         logger.warn({ code, reason: reason.toString() }, 'WebSocket disconnected');
         this.connectionState.next('disconnected');
+        this.stopHeartbeat();
         this.ws = null;
       });
 
@@ -142,6 +161,7 @@ export class HyperliquidWebSocket {
    */
   disconnect(): void {
     this.destroy$.next();
+    this.stopHeartbeat();
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -149,6 +169,22 @@ export class HyperliquidWebSocket {
     this.subscriptions.clear();
     this.connectionState.next('disconnected');
     logger.info('WebSocket disconnected');
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatInterval = setInterval(() => {
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ method: 'ping' }));
+      }
+    }, 30_000); // 30s, well under 60s server timeout
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
   }
 
   /**

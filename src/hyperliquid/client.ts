@@ -16,12 +16,37 @@ import type {
 
 const API_URL = config.HYPERLIQUID_API_URL;
 
+// Official Hyperliquid endpoint weights
+// https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits
+const ENDPOINT_WEIGHTS: Record<string, number> = {
+  clearinghouseState: 2,
+  spotClearinghouseState: 2,
+  allMids: 2,
+  orderStatus: 2,
+  exchangeStatus: 2,
+  l2Book: 2,
+  userFillsByTime: 20,
+  userFunding: 20,
+  userFills: 20,
+  portfolio: 20,
+  recentTrades: 20,
+  historicalOrders: 20,
+  fundingHistory: 20,
+  userRole: 60,
+};
+
 async function postInfo<T>(request: HyperliquidInfoRequest, priority: RequestPriority = 'polling'): Promise<T> {
+  const weight = ENDPOINT_WEIGHTS[request.type] ?? 20;
+
   // Wait if over budget -- backfill/polling back off, user requests always proceed
   let attempts = 0;
-  while (!rateBudget.record(priority) && priority !== 'user' && attempts < 10) {
-    await new Promise(r => setTimeout(r, 1000 + Math.random() * 2000));
+  while (!rateBudget.record(priority, weight) && priority !== 'user' && attempts < 30) {
+    await new Promise(r => setTimeout(r, 2000 + Math.random() * 3000));
     attempts++;
+  }
+  // User requests always record even if over budget
+  if (priority === 'user') {
+    rateBudget.record(priority, weight);
   }
 
   const response = await fetch(`${API_URL}/info`, {
@@ -48,7 +73,7 @@ export function fetchClearinghouseState(
     user: userAddress,
   };
 
-  return from(postInfo<HyperliquidClearinghouseState>(request)).pipe(
+  return from(postInfo<HyperliquidClearinghouseState>(request, 'polling')).pipe(
     tap(() => logger.debug({ user: userAddress }, 'Fetched clearinghouse state')),
     retry({
       count: 3,
@@ -130,7 +155,7 @@ export function fetchPortfolio(userAddress: string): Observable<HyperliquidPortf
     user: userAddress,
   };
 
-  return from(postInfo<HyperliquidPortfolio>(request)).pipe(
+  return from(postInfo<HyperliquidPortfolio>(request, 'user')).pipe(
     tap(() => logger.debug({ user: userAddress }, 'Fetched portfolio')),
     retry({
       count: 3,

@@ -12,7 +12,7 @@
  * └─────────────────────────────────────────────────────────────────────────┘
  */
 
-import { Observable, Subject, timer, EMPTY, from, of, firstValueFrom } from 'rxjs';
+import { Observable, Subject, EMPTY, from, of, firstValueFrom } from 'rxjs';
 import {
   filter,
   mergeMap,
@@ -22,32 +22,15 @@ import {
   takeUntil,
   tap,
   map,
-  concatMap,
-  delay,
   toArray,
 } from 'rxjs/operators';
 
 import { query } from '../../storage/db/client.js';
 import { logger } from '../../utils/logger.js';
+import { getHyperliquidWebSocket } from '../../hyperliquid/websocket.js';
 
-const API_URL = 'https://api.hyperliquid.xyz/info';
-
-// Popular coins to watch for trader discovery
-const DISCOVERY_COINS = ['BTC', 'ETH', 'SOL', 'ARB', 'DOGE', 'WIF', 'SUI', 'PEPE'];
-
-// Poll interval for discovery (5 minutes default - gentle on rate limits)
-const DISCOVERY_POLL_INTERVAL_MS = 5 * 60 * 1000;
-
-interface RecentTrade {
-  coin: string;
-  side: string;
-  px: string;
-  sz: string;
-  time: number;
-  hash: string;
-  tid: number;
-  users: string[];
-}
+// Coins to subscribe for trade-based discovery (via WebSocket - zero weight cost)
+const DISCOVERY_COINS = ['BTC', 'ETH', 'SOL'];
 
 interface DiscoveredTrader {
   address: string;
@@ -86,12 +69,12 @@ export class TraderDiscoveryStream {
     this._isRunning = true;
 
     await firstValueFrom(this.loadKnownAddresses$());
-    this.startPolling();
+    this.startWebSocketDiscovery();
     this.setupAutoQueueing();
 
     logger.info(
-      { coins: DISCOVERY_COINS, intervalMs: DISCOVERY_POLL_INTERVAL_MS },
-      'Trader discovery started'
+      { coins: DISCOVERY_COINS },
+      'Trader discovery started (WebSocket-based, zero weight cost)'
     );
   }
 
@@ -130,74 +113,32 @@ export class TraderDiscoveryStream {
   }
 
   /**
-   * Start polling using RxJS timer
+   * Subscribe to WebSocket trades for discovery coins (zero rate limit cost)
    */
-  private startPolling(): void {
-    timer(0, DISCOVERY_POLL_INTERVAL_MS)
-      .pipe(
-        takeUntil(this.destroy$),
-        mergeMap(() => this.pollAllCoins$())
-      )
-      .subscribe();
-  }
+  private startWebSocketDiscovery(): void {
+    const ws = getHyperliquidWebSocket();
 
-  /**
-   * Poll all discovery coins (fully RxJS-based)
-   */
-  private pollAllCoins$(): Observable<void> {
-    const beforeCount = this.seenAddresses.size;
-
-    return from(DISCOVERY_COINS).pipe(
-      concatMap((coin) =>
-        this.fetchRecentTrades$(coin).pipe(
-          tap((trades) => {
-            for (const trade of trades) {
-              if (trade.users) {
-                for (const address of trade.users) {
-                  this.checkAddress(address, coin);
-                }
-              }
-            }
-          }),
-          delay(100), // Small delay between coins
+    for (const coin of DISCOVERY_COINS) {
+      ws.subscribeToTrades(coin)
+        .pipe(
+          takeUntil(this.destroy$),
           catchError((err) => {
-            logger.warn({ coin, error: (err as Error).message }, 'Failed to fetch trades for coin');
-            return of([]);
+            logger.warn({ coin, error: (err as Error).message }, 'WS trade subscription error');
+            return EMPTY;
           })
         )
-      ),
-      toArray(),
-      tap(() => {
-        const newCount = this.seenAddresses.size - beforeCount;
-        if (newCount > 0) {
-          logger.info(
-            { newAddresses: newCount, totalSeen: this.seenAddresses.size },
-            'Discovery poll completed'
-          );
-        }
-      }),
-      map(() => void 0)
-    );
-  }
+        .subscribe((trades) => {
+          for (const trade of trades as Array<{ users?: string[]; coin?: string }>) {
+            if (trade.users) {
+              for (const address of trade.users) {
+                this.checkAddress(address, coin);
+              }
+            }
+          }
+        });
+    }
 
-  /**
-   * Fetch recent trades for a coin (returns Observable)
-   */
-  private fetchRecentTrades$(coin: string): Observable<RecentTrade[]> {
-    return from(
-      fetch(API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'recentTrades', coin }),
-      })
-    ).pipe(
-      mergeMap((response) => {
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-        return from(response.json() as Promise<RecentTrade[]>);
-      })
-    );
+    logger.info({ coins: DISCOVERY_COINS }, 'Discovery via WebSocket trades (zero weight cost)');
   }
 
   /**

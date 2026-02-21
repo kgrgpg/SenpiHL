@@ -8,6 +8,17 @@ vi.mock('../../utils/logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() },
 }));
 
+vi.mock('../../hyperliquid/websocket.js', () => {
+  const { EMPTY } = require('rxjs');
+  return {
+    getHyperliquidWebSocket: vi.fn().mockReturnValue({
+      subscribeToTrades: vi.fn().mockReturnValue(EMPTY),
+      subscribeToUserFills: vi.fn().mockReturnValue(EMPTY),
+      userSubscriptionCount: 0,
+    }),
+  };
+});
+
 import { query } from '../../storage/db/client.js';
 import { TraderDiscoveryStream } from './trader-discovery.stream.js';
 
@@ -139,110 +150,51 @@ describe('TraderDiscoveryStream', () => {
     });
   });
 
-  describe('Polling and discovery', () => {
-    it('should discover new addresses from trade data', async () => {
-      // Load known addresses
+  describe('WebSocket-based discovery', () => {
+    it('should start with WebSocket discovery (zero weight cost)', async () => {
       vi.mocked(query)
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
-        // Queue insert calls (from auto-queueing)
         .mockResolvedValue({ rows: [], rowCount: 0 });
-
-      const mockTrades = [
-        {
-          coin: 'BTC',
-          side: 'B',
-          px: '50000',
-          sz: '1',
-          time: Date.now(),
-          hash: '0x1',
-          tid: 1,
-          users: ['0xNewTrader1', '0xNewTrader2'],
-        },
-      ];
-
-      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve(mockTrades),
-      }));
-
-      const discovered: string[] = [];
-      stream.discoveries$.subscribe((d) => discovered.push(d.address));
 
       await stream.start();
 
-      // Wait for initial poll to complete
-      await new Promise((resolve) => setTimeout(resolve, 200));
-
-      expect(stream.discoveredCount).toBeGreaterThanOrEqual(2);
+      expect(stream.isRunning).toBe(true);
+      // Discovery now uses WebSocket trades subscriptions instead of REST polling
+      // No fetch calls needed for discovery
 
       stream.stop();
-      vi.unstubAllGlobals();
     });
 
-    it('should filter out known addresses', async () => {
+    it('should load known addresses and exclude them from discovery', async () => {
       vi.mocked(query)
         .mockResolvedValueOnce({
-          rows: [{ address: '0xknowntrader' }],
+          rows: [{ address: '0xknown1' }, { address: '0xknown2' }],
+          rowCount: 2,
+        })
+        .mockResolvedValueOnce({
+          rows: [{ address: '0xqueued1' }],
           rowCount: 1,
         })
-        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
         .mockResolvedValue({ rows: [], rowCount: 0 });
 
-      const mockTrades = [
-        {
-          coin: 'BTC',
-          side: 'B',
-          px: '50000',
-          sz: '1',
-          time: Date.now(),
-          hash: '0x1',
-          tid: 1,
-          users: ['0xKnownTrader', '0xBrandNew'],
-        },
-      ];
-
-      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve(mockTrades),
-      }));
-
-      const discovered: string[] = [];
-      stream.discoveries$.subscribe((d) => discovered.push(d.address));
-
       await stream.start();
-      await new Promise((resolve) => setTimeout(resolve, 200));
 
-      // Should only discover 0xBrandNew, not 0xKnownTrader
-      expect(discovered).toContain('0xBrandNew');
-      const knownInDiscovered = discovered.filter(
-        (a) => a.toLowerCase() === '0xknowntrader'
-      );
-      expect(knownInDiscovered).toHaveLength(0);
+      const stats = stream.getStats();
+      expect(stats.knownTotal).toBe(3);
 
       stream.stop();
-      vi.unstubAllGlobals();
     });
 
-    it('should handle API errors gracefully', async () => {
-      vi.mocked(query)
-        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
-        .mockResolvedValueOnce({ rows: [], rowCount: 0 });
-
-      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-        ok: false,
-        status: 429,
-      }));
+    it('should handle startup gracefully even if DB fails', async () => {
+      vi.mocked(query).mockRejectedValue(new Error('DB down'));
 
       await stream.start();
-      await new Promise((resolve) => setTimeout(resolve, 200));
 
-      // Should not crash, just log warning
       expect(stream.isRunning).toBe(true);
       expect(stream.discoveredCount).toBe(0);
 
       stream.stop();
-      vi.unstubAllGlobals();
     });
   });
 });

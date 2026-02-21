@@ -61,11 +61,13 @@ export interface HybridEvent {
   data: WebSocketFill | HyperliquidClearinghouseState;
 }
 
+const MAX_WS_USERS = 10;
+
 interface TraderSubscription {
   address: string;
   subscribedAt: number;
   lastSnapshot: number;
-  fillSubscription: Subscription;
+  fillSubscription: Subscription | null; // null = polling-only (WS slots full)
 }
 
 const SNAPSHOT_INTERVAL_MS = config.POLL_INTERVAL_MS || 5 * 60 * 1000;
@@ -95,29 +97,32 @@ export class HybridDataStream {
       return;
     }
 
-    // Create WebSocket subscription (tracked for cleanup)
-    const fillSubscription = this.ws
-      .subscribeToUserFills(address)
-      .pipe(
-        map(
-          (fill): HybridEvent => ({
-            type: 'fill',
-            address,
-            timestamp: fill.time,
-            data: fill,
+    // Only subscribe via WebSocket if under the 10-user limit
+    let fillSubscription: Subscription | null = null;
+    if (this.ws.userSubscriptionCount < MAX_WS_USERS) {
+      fillSubscription = this.ws
+        .subscribeToUserFills(address)
+        .pipe(
+          map(
+            (fill): HybridEvent => ({
+              type: 'fill',
+              address,
+              timestamp: fill.time,
+              data: fill,
+            })
+          ),
+          tap((event) => this.events$.next(event)),
+          takeUntil(this.destroy$),
+          catchError((err) => {
+            logger.error(
+              { error: (err as Error).message, address },
+              'WebSocket fill subscription error'
+            );
+            return EMPTY;
           })
-        ),
-        tap((event) => this.events$.next(event)),
-        takeUntil(this.destroy$),
-        catchError((err) => {
-          logger.error(
-            { error: (err as Error).message, address },
-            'WebSocket fill subscription error'
-          );
-          return EMPTY;
-        })
-      )
-      .subscribe();
+        )
+        .subscribe();
+    }
 
     // Add to tracked traders with subscription reference
     this.traders.set(address, {
@@ -142,11 +147,13 @@ export class HybridDataStream {
       return;
     }
 
-    // Unsubscribe from WebSocket fill events
-    trader.fillSubscription.unsubscribe();
+    // Unsubscribe from WebSocket fill events (if subscribed)
+    if (trader.fillSubscription) {
+      trader.fillSubscription.unsubscribe();
+      this.ws.unsubscribeFromUserFills(address);
+    }
 
     this.traders.delete(address);
-    this.ws.unsubscribeFromUserFills(address);
 
     logger.info(
       { address, totalTraders: this.traders.size },
@@ -170,7 +177,9 @@ export class HybridDataStream {
 
     // Cleanup all trader subscriptions
     for (const trader of this.traders.values()) {
-      trader.fillSubscription.unsubscribe();
+      if (trader.fillSubscription) {
+        trader.fillSubscription.unsubscribe();
+      }
     }
     this.traders.clear();
 
