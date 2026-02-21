@@ -82,46 +82,61 @@ When the app starts, it polls ALL traders immediately in the first cycle. 1,000 
 - 1,000 traders / 5 min = 200 req/min = 400 weight/min (safe)
 - Batch size 10, delay 3s between batches: 100 batches × 3s = 300s = 5 min
 
-## Design Decisions
+## Design Decisions (Implemented)
 
 ### 1. WebSocket for Top 10 Traders Only
 
-Since the limit is 10 unique users, we subscribe the 10 most recently active traders via WebSocket for real-time fills. All other traders are polled.
+The limit is 10 unique users for user-specific subscriptions. We subscribe the first 10 traders via WebSocket for real-time fills. All other traders get position polling only.
+
+Additionally, we subscribe to `trades` by coin (BTC, ETH, SOL) for trader discovery -- these are coin-level subscriptions, not user-specific, so they don't count toward the 10-user limit.
 
 ### 2. Weight-Based Rate Budget
 
-The rate budget tracks weight consumed, not raw request counts. Each API call registers its actual weight:
+The rate budget tracks weight consumed, not raw request counts. Each API call registers its actual weight via the `ENDPOINT_WEIGHTS` map in `client.ts`:
 
 ```
 clearinghouseState: 2 weight
-userFillsByTime:    20 weight (minimum)
-userFunding:        20 weight (minimum)
+userFillsByTime:    20 weight (+ 1 per 20 items returned)
+userFunding:        20 weight (+ 1 per 20 items returned)
 portfolio:          20 weight
+allMids:            2 weight
+userRole:           60 weight
 ```
+
+Non-user-priority requests wait (backoff) when the weight budget is exceeded.
 
 ### 3. Polling Stagger
 
-Position snapshots are spread across the 5-minute interval to avoid bursts:
+Position snapshots are spread across the 5-minute interval:
 - Batch size: 10 traders
 - Delay between batches: 3 seconds
-- Total cycle time: matches the polling interval
+- 1000 traders = 100 batches × 3s = 300s = 5 min (matches interval)
 
-### 4. Backfill Throttle
+### 4. WebSocket Heartbeat
 
-Backfill chunks (40 weight each) are rate-limited by the budget manager. Workers wait when weight budget is exhausted.
+Ping every 30 seconds to prevent the 60-second idle timeout. Pong responses are filtered from the message stream.
 
-### 5. On-Demand Queries Use "User" Priority
+### 5. Discovery via WebSocket Trades
 
-When a user queries a specific trader, the API calls (portfolio + fills + funding = 60+ weight) are prioritized over backfill. Backfill workers pause to make room.
+Trader discovery uses WebSocket `trades` subscriptions for BTC/ETH/SOL (zero weight cost) instead of REST `recentTrades` polling (160 weight/cycle). Real-time discovery with no rate limit impact.
 
-## Comparison: Before and After
+### 6. Backfill Throttle
 
-| Aspect | Before (wrong) | After (correct) |
-|--------|---------------|-----------------|
-| Budget unit | raw requests | weighted requests |
-| Budget size | 1,200 "requests" | 1,200 weight |
-| clearinghouseState cost | 1 | 2 |
-| Backfill chunk cost | 2 | 40+ |
-| WebSocket traders | 1000+ (silently failing) | 10 (actual limit) |
-| Polling burst | all-at-once | staggered over 5 min |
-| Max safe traders | "5000" (claimed) | ~3,000 (real) |
+Backfill API calls are tagged as `'backfill'` priority. Workers wait up to 30 attempts (2-5s each) when weight budget is exhausted. Worker concurrency adjusts every 10s based on available backfill budget.
+
+### 7. On-Demand Queries Use "User" Priority
+
+When a user queries a specific trader, the API calls (portfolio + fills + funding = 60+ weight) use `'user'` priority which always proceeds even when the budget is tight.
+
+## Current Implementation Status
+
+| Aspect | Status |
+|--------|--------|
+| Weight-based budget | Implemented (`rate-budget.ts`) |
+| Endpoint weight map | Implemented (`client.ts`) |
+| WebSocket 10-user cap | Implemented (`hybrid.stream.ts`) |
+| WebSocket heartbeat | Implemented (`websocket.ts`, 30s ping) |
+| Discovery via WS trades | Implemented (`trader-discovery.stream.ts`) |
+| Staggered polling | Implemented (3s batch delay) |
+| Backfill throttle | Implemented (wait on budget) |
+| 429 errors | Zero after initial startup burst |

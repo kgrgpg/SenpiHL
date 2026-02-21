@@ -83,19 +83,23 @@ Unrealized PnL = Σ (mark_price - entry_price) × size × direction
 
 ---
 
-## 6. Adaptive Rate Budget
+## 6. Weight-Based Rate Budget
 
-Hyperliquid allows ~1,200 req/min. We target **80% utilization** (960 req/min):
+Hyperliquid rate limits are **weight-based**: 1,200 weight/min per IP. We target 80% (960 weight/min):
 
-| Consumer | Priority | Typical Usage |
-|----------|----------|--------------|
-| On-demand user requests | Highest | 0-500 req/min |
-| Position polling | Medium | ~114 req/min |
-| Backfill workers | Fills remaining | 346-846 req/min |
+| Consumer | Priority | Weight Cost | Typical Usage |
+|----------|----------|-------------|--------------|
+| On-demand user queries | Highest | 60/query (portfolio+fills+funding) | Varies |
+| Position polling | Medium | 2/trader (clearinghouseState) | 400 weight/min |
+| Backfill workers | Fills remaining | 40/chunk (fills+funding) | ~500 weight/min |
 
-Backfill concurrency auto-adjusts every 10 seconds. When users request unknown traders, backfill scales down. When idle, it scales up to 7 workers.
+**WebSocket limits**: Max 10 unique users for `userFills`. We subscribe the first 10 traders; rest are polling-only. Discovery uses coin-level `trades` subscriptions (BTC, ETH, SOL) at zero weight cost.
+
+**Heartbeat**: 30s ping prevents 60s idle timeout.
 
 Unknown traders return live data on first request (no 404) -- fetched from Hyperliquid in ~2s, then backfilled in background.
+
+Full rate limit analysis: [RATE_LIMIT_ANALYSIS.md](./RATE_LIMIT_ANALYSIS.md)
 
 ---
 
