@@ -155,6 +155,111 @@ export function calculateUnrealizedPnlForPosition(
   return markPrice.minus(entryPrice).times(size.abs()).times(direction);
 }
 
+/**
+ * Compute a TradeData from a coin-level WsTrade event for a specific trader.
+ *
+ * Uses the trader's current position to determine:
+ * - Whether this trade opens or closes (or flips) a position
+ * - The closedPnl based on entry price vs execution price
+ *
+ * Note: fee is estimated as 0 since WsTrade doesn't include per-user fees.
+ * The 5-minute reconciliation via clearinghouseState corrects cumulative PnL.
+ */
+export function computeFillFromWsTrade(
+  coin: string,
+  tradePrice: Decimal,
+  tradeSize: Decimal,
+  traderSide: 'B' | 'A',
+  traderAddress: string,
+  tid: number,
+  time: number,
+  state: PnLStateData
+): TradeData {
+  const position = state.positions.get(coin);
+  let closedPnl = new Decimal(0);
+
+  if (position && !position.size.isZero()) {
+    const positionIsLong = position.size.isPositive();
+    const tradeIsClosing = (positionIsLong && traderSide === 'A') || (!positionIsLong && traderSide === 'B');
+
+    if (tradeIsClosing) {
+      const closeSize = Decimal.min(tradeSize, position.size.abs());
+      const direction = positionIsLong ? new Decimal(1) : new Decimal(-1);
+      closedPnl = tradePrice.minus(position.entryPrice).times(closeSize).times(direction);
+    }
+  }
+
+  const startPos = position ? position.size.toString() : '0';
+  const dir = position?.size.isPositive()
+    ? (traderSide === 'A' ? 'Close Long' : 'Open Long')
+    : position?.size.isNegative()
+      ? (traderSide === 'B' ? 'Close Short' : 'Open Short')
+      : (traderSide === 'B' ? 'Open Long' : 'Open Short');
+
+  return {
+    coin,
+    side: traderSide,
+    size: tradeSize,
+    price: tradePrice,
+    closedPnl,
+    fee: new Decimal(0), // WsTrade doesn't include per-user fees
+    timestamp: new Date(time),
+    tid,
+    isLiquidation: false,
+    direction: dir,
+    startPosition: startPos,
+  };
+}
+
+/**
+ * Update in-memory position state after processing a WsTrade fill.
+ * Adjusts the position size and entry price (weighted average for opens).
+ */
+export function updatePositionFromFill(
+  state: PnLStateData,
+  coin: string,
+  side: 'B' | 'A',
+  size: Decimal,
+  price: Decimal
+): void {
+  const position = state.positions.get(coin);
+  const currentSize = position?.size ?? new Decimal(0);
+  const currentEntry = position?.entryPrice ?? price;
+
+  const tradeDelta = side === 'B' ? size : size.negated();
+  const newSize = currentSize.plus(tradeDelta);
+
+  let newEntry: Decimal;
+  if (newSize.isZero()) {
+    newEntry = new Decimal(0);
+  } else if (currentSize.isZero() || currentSize.isNeg() !== newSize.isNeg()) {
+    // New position or flipped
+    newEntry = price;
+  } else if (currentSize.isPositive() === tradeDelta.isPositive()) {
+    // Adding to position: weighted average entry
+    newEntry = currentEntry.times(currentSize.abs()).plus(price.times(size))
+      .div(currentSize.abs().plus(size));
+  } else {
+    // Reducing position: entry stays the same
+    newEntry = currentEntry;
+  }
+
+  if (newSize.isZero()) {
+    state.positions.delete(coin);
+  } else {
+    state.positions.set(coin, {
+      coin,
+      size: newSize,
+      entryPrice: newEntry,
+      unrealizedPnl: new Decimal(0),
+      leverage: position?.leverage ?? 1,
+      liquidationPrice: position?.liquidationPrice ?? null,
+      marginUsed: position?.marginUsed ?? new Decimal(0),
+      marginType: position?.marginType ?? 'cross',
+    });
+  }
+}
+
 export function parsePositionFromApi(
   coin: string,
   szi: string,

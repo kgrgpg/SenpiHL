@@ -265,6 +265,27 @@ export class HyperliquidWebSocket {
   }
 
   /**
+   * Subscribe to real-time mid prices for all coins (zero weight, not user-specific)
+   */
+  subscribeToAllMids(): Observable<Record<string, string>> {
+    const subscription: Subscription = {
+      type: 'allMids',
+    };
+
+    this.addSubscription('allMids', subscription);
+
+    return this.messageSubject.pipe(
+      filter((msg) => msg.channel === 'allMids'),
+      map((msg) => {
+        const data = msg.data as { mids: Record<string, string> };
+        return data.mids;
+      }),
+      takeUntil(this.destroy$),
+      share()
+    );
+  }
+
+  /**
    * Unsubscribe from a user's fills
    */
   unsubscribeFromUserFills(userAddress: string): void {

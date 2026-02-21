@@ -1,15 +1,16 @@
 /**
- * Trader Discovery Stream
+ * Trader Discovery + Fill Capture Stream
  *
- * Automatically discovers new traders by polling recentTrades from the REST API.
- * The recentTrades endpoint includes both buyer and seller addresses!
- *
- * Uses consistent RxJS patterns throughout.
+ * Subscribes to coin-level WebSocket trades to:
+ * 1. Discover new traders (existing behavior)
+ * 2. Capture every fill for ALL tracked traders on subscribed coins
+ *    (not limited to 10 like userFills)
  *
  * Flow:
- * ┌─────────────────────────────────────────────────────────────────────────┐
- * │  Poll recentTrades ──▶ Extract addresses ──▶ Check DB ──▶ Queue new    │
- * └─────────────────────────────────────────────────────────────────────────┘
+ * ┌────────────────────────────────────────────────────────────────────────────┐
+ * │  WS trades ──▶ Discovery: queue new addresses                             │
+ * │            ──▶ Fill capture: match tracked traders, compute PnL, persist  │
+ * └────────────────────────────────────────────────────────────────────────────┘
  */
 
 import { Observable, Subject, EMPTY, from, of, firstValueFrom } from 'rxjs';
@@ -25,12 +26,31 @@ import {
   toArray,
 } from 'rxjs/operators';
 
-import { query } from '../../storage/db/client.js';
-import { logger } from '../../utils/logger.js';
 import { getHyperliquidWebSocket } from '../../hyperliquid/websocket.js';
+import { computeFillFromWsTrade, updatePositionFromFill, applyTrade } from '../../pnl/calculator.js';
+import { getTraderState, setTraderState } from '../../state/trader-state.js';
+import { query } from '../../storage/db/client.js';
+import { tradesRepo } from '../../storage/db/repositories/trades.repo.js';
+import { toDecimal } from '../../utils/decimal.js';
+import { logger } from '../../utils/logger.js';
 
-// Coins to subscribe for trade-based discovery (via WebSocket - zero weight cost)
-const DISCOVERY_COINS = ['BTC', 'ETH', 'SOL'];
+interface WsTrade {
+  coin: string;
+  side: 'B' | 'A';   // taker side
+  px: string;         // price
+  sz: string;         // size
+  hash: string;       // tx hash
+  time: number;       // timestamp ms
+  tid: number;
+  users: [string, string]; // [maker, taker]
+}
+
+// Top coins by volume for comprehensive trade capture
+const DISCOVERY_COINS = [
+  'BTC', 'ETH', 'SOL', 'ARB', 'DOGE',
+  'WIF', 'SUI', 'PEPE', 'AVAX', 'MATIC',
+  'OP', 'APT', 'INJ', 'SEI', 'TIA',
+];
 
 interface DiscoveredTrader {
   address: string;
@@ -46,6 +66,7 @@ export class TraderDiscoveryStream {
   private readonly knownAddresses = new Set<string>();
   private _isRunning = false;
   private _discoveredCount = 0;
+  private _fillsCaptured = 0;
 
   constructor() {}
 
@@ -113,7 +134,10 @@ export class TraderDiscoveryStream {
   }
 
   /**
-   * Subscribe to WebSocket trades for discovery coins (zero rate limit cost)
+   * Subscribe to WebSocket trades for discovery + fill capture (zero rate limit cost).
+   * Each trade event contains [maker, taker] addresses.
+   * - Maker has the opposite side of trade.side
+   * - Taker has the same side as trade.side
    */
   private startWebSocketDiscovery(): void {
     const ws = getHyperliquidWebSocket();
@@ -127,18 +151,71 @@ export class TraderDiscoveryStream {
             return EMPTY;
           })
         )
-        .subscribe((trades) => {
-          for (const trade of trades as Array<{ users?: string[]; coin?: string }>) {
-            if (trade.users) {
-              for (const address of trade.users) {
-                this.checkAddress(address, coin);
-              }
-            }
+        .subscribe((rawTrades) => {
+          for (const trade of rawTrades as WsTrade[]) {
+            if (!trade.users || trade.users.length < 2) continue;
+
+            const [maker, taker] = trade.users;
+
+            this.checkAddress(maker, coin);
+            this.checkAddress(taker, coin);
+
+            const makerSide: 'B' | 'A' = trade.side === 'B' ? 'A' : 'B';
+            const takerSide: 'B' | 'A' = trade.side;
+
+            this.processFillForTrader(maker, coin, trade, makerSide);
+            this.processFillForTrader(taker, coin, trade, takerSide);
           }
         });
     }
 
-    logger.info({ coins: DISCOVERY_COINS }, 'Discovery via WebSocket trades (zero weight cost)');
+    logger.info({ coins: DISCOVERY_COINS, count: DISCOVERY_COINS.length },
+      'Discovery + fill capture via WebSocket trades (zero weight cost)');
+  }
+
+  /**
+   * If address is a tracked trader, compute closedPnl, apply to state, and persist.
+   */
+  private processFillForTrader(
+    address: string,
+    coin: string,
+    trade: WsTrade,
+    side: 'B' | 'A'
+  ): void {
+    const normalized = address.toLowerCase();
+    const state = getTraderState(normalized);
+    if (!state) return;
+
+    const price = toDecimal(trade.px);
+    const size = toDecimal(trade.sz);
+
+    const fill = computeFillFromWsTrade(
+      coin, price, size, side, normalized, trade.tid, trade.time, state
+    );
+
+    const updated = applyTrade(state, fill);
+    updatePositionFromFill(updated, coin, side, size, price);
+    setTraderState(normalized, updated);
+
+    this._fillsCaptured++;
+
+    from(tradesRepo.insert({
+      traderId: state.traderId,
+      coin,
+      side,
+      size,
+      price,
+      closedPnl: fill.closedPnl,
+      fee: fill.fee,
+      timestamp: fill.timestamp,
+      txHash: trade.hash,
+      tid: trade.tid,
+    })).pipe(
+      catchError((err) => {
+        logger.warn({ err: (err as Error).message, tid: trade.tid }, 'Failed to persist WS trade fill');
+        return EMPTY;
+      })
+    ).subscribe();
   }
 
   /**
@@ -206,11 +283,19 @@ export class TraderDiscoveryStream {
     );
   }
 
-  getStats(): { seenThisSession: number; knownTotal: number; isRunning: boolean } {
+  getStats(): {
+    seenThisSession: number;
+    knownTotal: number;
+    isRunning: boolean;
+    fillsCaptured: number;
+    subscribedCoins: number;
+  } {
     return {
       seenThisSession: this.seenAddresses.size,
       knownTotal: this.knownAddresses.size,
       isRunning: this.isRunning,
+      fillsCaptured: this._fillsCaptured,
+      subscribedCoins: DISCOVERY_COINS.length,
     };
   }
 }

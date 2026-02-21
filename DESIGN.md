@@ -13,6 +13,7 @@
 7. [Caching Strategy](#7-caching-strategy)
 8. [Error Handling & Resilience](#8-error-handling--resilience)
 9. [Data Storage: Trades + Snapshots](#9-data-storage-trades--snapshots)
+10. [All-Trader Trade Capture](#10-all-trader-trade-capture)
 
 ---
 
@@ -351,10 +352,49 @@ Levels: `exact` (authoritative), `partial` (realized only), `estimate` (approxim
 ### Data Completeness Over Time
 
 The longer the system runs, the more complete the data:
-- **Day 1**: Standard timeframes only (via portfolio API)
-- **Day 7**: Custom ranges within last 7 days (from stored snapshots)
+- **Day 1**: Standard timeframes only (via portfolio API), real-time fills for all tracked traders on top 15 coins
+- **Day 7**: Custom ranges within last 7 days (from stored fills + snapshots)
 - **Day 30+**: Near-complete history for all tracked traders
-- **Real-time**: All fills captured via WebSocket for top 10 traders + polling for all
+- **Real-time**: All fills captured via coin-level WS trades for ALL tracked traders (not limited to 10)
+
+---
+
+## 10. All-Trader Trade Capture
+
+### Context
+
+The `userFills` WebSocket channel is limited to 10 unique users. For traders beyond the first 10, fills were only captured via REST polling (expensive in API weight). This meant incomplete real-time data for most tracked traders.
+
+### Decision
+
+Subscribe to **coin-level `trades`** WebSocket channels for top 15 coins by volume. Each trade event includes both buyer and seller addresses, allowing us to capture fills for ALL tracked traders -- not just 10.
+
+### Architecture
+
+| Component | Role |
+|-----------|------|
+| `trades` WS (15 coins) | Capture fills for all tracked traders (zero weight) |
+| `allMids` WS | Real-time mark prices for unrealized PnL (zero weight) |
+| `userFills` WS (10 users) | Authoritative fills with closedPnl + fees for top 10 |
+| `clearinghouseState` polling | Reconciliation every 5 min (corrects position drift) |
+
+### Trade-offs
+
+| Aspect | coin-level `trades` | `userFills` |
+|--------|---------------------|-------------|
+| Trader limit | Unlimited | 10 |
+| `closedPnl` | Computed locally from position state | Provided by Hyperliquid |
+| `fee` | Estimated (0, corrected at reconciliation) | Exact |
+| Coin coverage | Subscribed coins only (top 15) | All coins |
+| Weight cost | Zero (WebSocket) | Zero (WebSocket) |
+
+### Rationale
+
+- The 10-user `userFills` limit was the primary bottleneck for real-time data
+- Coin-level trades are coin subscriptions (limit: 1000), not user subscriptions
+- Top 15 coins cover >90% of trading volume
+- Local `closedPnl` computation is correct for the common case (close position at execution price)
+- 5-minute reconciliation via `clearinghouseState` corrects any cumulative drift
 
 ---
 
@@ -372,3 +412,4 @@ The longer the system runs, the more complete the data:
 | Error Handling | Defense in depth | Retry, circuit breaker, graceful degradation |
 | Data Storage | Trades + Snapshots | Audit trail + read-optimized projections |
 | Rate Budget | Weight-based, 80% target | Correct weights per endpoint, staggered polling |
+| Trade Capture | Coin-level WS for all traders | Bypasses 10-user limit, zero weight cost |

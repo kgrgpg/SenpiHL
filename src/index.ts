@@ -299,10 +299,14 @@ async function bootstrapHybridMode(): Promise<void> {
 
   logger.info('Hybrid data pipeline started');
 
-  // Start trader discovery
+  // Start price service (allMids WebSocket - zero weight)
+  const { startPriceService } = await import('./state/price-service.js');
+  startPriceService();
+
+  // Start trader discovery + fill capture
   const discoveryStream = getTraderDiscoveryStream();
   await discoveryStream.start();
-  logger.info('Trader discovery started');
+  logger.info('Trader discovery + fill capture started');
 
   // Start auto-subscribe job using RxJS interval (not setInterval)
   autoSubscribeSubscription = createAutoSubscribeStream$().subscribe();
@@ -407,8 +411,10 @@ async function bootstrap(): Promise<void> {
       autoSubscribeSubscription.unsubscribe();
     }
 
-    // Stop discovery
+    // Stop discovery and price service
     stopTraderDiscovery();
+    const { stopPriceService } = await import('./state/price-service.js');
+    stopPriceService();
 
     // Close hybrid stream and WebSocket
     closeHybridDataStream();

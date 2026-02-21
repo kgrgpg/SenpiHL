@@ -4,6 +4,35 @@ All notable changes to the PnL Indexer project.
 
 ---
 
+## [1.2.0] - 2026-02-21
+
+### All-Trader Real-Time Trade Capture
+
+Replaces the 10-user `userFills` bottleneck with coin-level WebSocket `trades` subscriptions, enabling real-time fill capture for ALL tracked traders.
+
+#### Added
+- **Price Service** (`src/state/price-service.ts`): Subscribes to `allMids` WebSocket channel, maintains real-time mid price cache for all coins (zero weight cost)
+- **`subscribeToAllMids()`** in `websocket.ts`: New WebSocket subscription method for `allMids` channel
+- **`computeFillFromWsTrade()`** in `calculator.ts`: Computes closedPnl from coin-level WsTrade events using trader's position state (entry price vs execution price)
+- **`updatePositionFromFill()`** in `calculator.ts`: Updates in-memory position state (size, weighted average entry price) after processing a WsTrade fill
+- **Fill capture in trader-discovery stream**: Each WsTrade event is checked against tracked traders; fills are computed, applied to PnL state, and persisted to the `trades` table
+- **Expanded coin subscriptions**: From 3 (BTC, ETH, SOL) to 15 top coins by volume (covers >90% of trading activity)
+
+#### Architecture Change
+
+| Component | Before | After |
+|-----------|--------|-------|
+| Real-time fills | 10 traders (userFills WS limit) | ALL tracked traders on 15 coins |
+| API weight cost | 2 weight/trader/5min for polling | 0 (WebSocket push) |
+| Discovery + tracking | Separate systems | Combined (same WS subscription) |
+
+#### Design Decision (#10)
+- Documented in `DESIGN.md` as ADR #10: All-Trader Trade Capture
+- Trade-off: closedPnl is computed locally (not from Hyperliquid) but fees are estimated (corrected at 5-min reconciliation)
+- 5-minute `clearinghouseState` polling remains as authoritative reconciliation
+
+---
+
 ## [1.1.2] - 2026-02-20
 
 ### 🔧 Delta PnL Fix & Data Storage Design Documentation

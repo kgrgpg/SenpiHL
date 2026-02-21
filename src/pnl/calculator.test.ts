@@ -16,6 +16,8 @@ import {
   parseFundingFromApi,
   parsePositionFromApi,
   isPositionFlip,
+  computeFillFromWsTrade,
+  updatePositionFromFill,
 } from './calculator.js';
 import type { TradeData, FundingData, PositionData } from './types.js';
 
@@ -874,6 +876,192 @@ describe('PnL Calculator', () => {
       state = applyTrade(state, flipTrade);
 
       expect(state.flipCount).toBe(1);
+    });
+  });
+
+  describe('computeFillFromWsTrade', () => {
+    it('should compute zero closedPnl for an opening trade (no existing position)', () => {
+      const state = createInitialState(1, '0xTrader');
+
+      const fill = computeFillFromWsTrade(
+        'BTC', toDecimal('50000'), toDecimal('1'), 'B', '0xTrader',
+        100, Date.now(), state
+      );
+
+      expect(fill.closedPnl.toNumber()).toBe(0);
+      expect(fill.coin).toBe('BTC');
+      expect(fill.side).toBe('B');
+      expect(fill.direction).toBe('Open Long');
+    });
+
+    it('should compute positive closedPnl when closing a profitable long', () => {
+      const state = createInitialState(1, '0xTrader');
+      state.positions.set('BTC', {
+        coin: 'BTC',
+        size: toDecimal('2'),
+        entryPrice: toDecimal('40000'),
+        unrealizedPnl: toDecimal('0'),
+        leverage: 1,
+        liquidationPrice: null,
+        marginUsed: toDecimal('0'),
+        marginType: 'cross',
+      });
+
+      const fill = computeFillFromWsTrade(
+        'BTC', toDecimal('50000'), toDecimal('1'), 'A', '0xTrader',
+        101, Date.now(), state
+      );
+
+      // (50000 - 40000) * 1 * 1 = 10000
+      expect(fill.closedPnl.toNumber()).toBe(10000);
+      expect(fill.direction).toBe('Close Long');
+    });
+
+    it('should compute positive closedPnl when closing a profitable short', () => {
+      const state = createInitialState(1, '0xTrader');
+      state.positions.set('ETH', {
+        coin: 'ETH',
+        size: toDecimal('-5'),
+        entryPrice: toDecimal('3000'),
+        unrealizedPnl: toDecimal('0'),
+        leverage: 1,
+        liquidationPrice: null,
+        marginUsed: toDecimal('0'),
+        marginType: 'cross',
+      });
+
+      const fill = computeFillFromWsTrade(
+        'ETH', toDecimal('2500'), toDecimal('3'), 'B', '0xTrader',
+        102, Date.now(), state
+      );
+
+      // (2500 - 3000) * 3 * -1 = 1500
+      expect(fill.closedPnl.toNumber()).toBe(1500);
+      expect(fill.direction).toBe('Close Short');
+    });
+
+    it('should compute negative closedPnl for a losing close', () => {
+      const state = createInitialState(1, '0xTrader');
+      state.positions.set('BTC', {
+        coin: 'BTC',
+        size: toDecimal('1'),
+        entryPrice: toDecimal('50000'),
+        unrealizedPnl: toDecimal('0'),
+        leverage: 1,
+        liquidationPrice: null,
+        marginUsed: toDecimal('0'),
+        marginType: 'cross',
+      });
+
+      const fill = computeFillFromWsTrade(
+        'BTC', toDecimal('45000'), toDecimal('1'), 'A', '0xTrader',
+        103, Date.now(), state
+      );
+
+      // (45000 - 50000) * 1 * 1 = -5000
+      expect(fill.closedPnl.toNumber()).toBe(-5000);
+    });
+
+    it('should set fee to 0 (WsTrade does not include per-user fees)', () => {
+      const state = createInitialState(1, '0xTrader');
+
+      const fill = computeFillFromWsTrade(
+        'BTC', toDecimal('50000'), toDecimal('1'), 'B', '0xTrader',
+        104, Date.now(), state
+      );
+
+      expect(fill.fee.toNumber()).toBe(0);
+    });
+  });
+
+  describe('updatePositionFromFill', () => {
+    it('should open a new long position', () => {
+      const state = createInitialState(1, '0xTrader');
+
+      updatePositionFromFill(state, 'BTC', 'B', toDecimal('2'), toDecimal('50000'));
+
+      const pos = state.positions.get('BTC')!;
+      expect(pos.size.toNumber()).toBe(2);
+      expect(pos.entryPrice.toNumber()).toBe(50000);
+    });
+
+    it('should add to existing long with weighted average entry', () => {
+      const state = createInitialState(1, '0xTrader');
+      state.positions.set('BTC', {
+        coin: 'BTC',
+        size: toDecimal('1'),
+        entryPrice: toDecimal('40000'),
+        unrealizedPnl: toDecimal('0'),
+        leverage: 1,
+        liquidationPrice: null,
+        marginUsed: toDecimal('0'),
+        marginType: 'cross',
+      });
+
+      updatePositionFromFill(state, 'BTC', 'B', toDecimal('1'), toDecimal('50000'));
+
+      const pos = state.positions.get('BTC')!;
+      expect(pos.size.toNumber()).toBe(2);
+      // (40000 * 1 + 50000 * 1) / (1 + 1) = 45000
+      expect(pos.entryPrice.toNumber()).toBe(45000);
+    });
+
+    it('should reduce a long position (entry stays same)', () => {
+      const state = createInitialState(1, '0xTrader');
+      state.positions.set('BTC', {
+        coin: 'BTC',
+        size: toDecimal('3'),
+        entryPrice: toDecimal('40000'),
+        unrealizedPnl: toDecimal('0'),
+        leverage: 1,
+        liquidationPrice: null,
+        marginUsed: toDecimal('0'),
+        marginType: 'cross',
+      });
+
+      updatePositionFromFill(state, 'BTC', 'A', toDecimal('1'), toDecimal('50000'));
+
+      const pos = state.positions.get('BTC')!;
+      expect(pos.size.toNumber()).toBe(2);
+      expect(pos.entryPrice.toNumber()).toBe(40000);
+    });
+
+    it('should remove position when fully closed', () => {
+      const state = createInitialState(1, '0xTrader');
+      state.positions.set('BTC', {
+        coin: 'BTC',
+        size: toDecimal('1'),
+        entryPrice: toDecimal('40000'),
+        unrealizedPnl: toDecimal('0'),
+        leverage: 1,
+        liquidationPrice: null,
+        marginUsed: toDecimal('0'),
+        marginType: 'cross',
+      });
+
+      updatePositionFromFill(state, 'BTC', 'A', toDecimal('1'), toDecimal('50000'));
+
+      expect(state.positions.has('BTC')).toBe(false);
+    });
+
+    it('should flip position to short on oversized sell', () => {
+      const state = createInitialState(1, '0xTrader');
+      state.positions.set('BTC', {
+        coin: 'BTC',
+        size: toDecimal('1'),
+        entryPrice: toDecimal('40000'),
+        unrealizedPnl: toDecimal('0'),
+        leverage: 1,
+        liquidationPrice: null,
+        marginUsed: toDecimal('0'),
+        marginType: 'cross',
+      });
+
+      updatePositionFromFill(state, 'BTC', 'A', toDecimal('3'), toDecimal('50000'));
+
+      const pos = state.positions.get('BTC')!;
+      expect(pos.size.toNumber()).toBe(-2);
+      expect(pos.entryPrice.toNumber()).toBe(50000);
     });
   });
 });
