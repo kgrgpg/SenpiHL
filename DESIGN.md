@@ -14,6 +14,7 @@
 8. [Error Handling & Resilience](#8-error-handling--resilience)
 9. [Data Storage: Trades + Snapshots](#9-data-storage-trades--snapshots)
 10. [All-Trader Trade Capture](#10-all-trader-trade-capture)
+11. [Data Consistency and Integrity](#11-data-consistency-and-integrity)
 
 ---
 
@@ -410,6 +411,62 @@ Subscribe to **coin-level `trades`** WebSocket channels for top 15 coins by volu
 
 ---
 
+## 11. Data Consistency and Integrity
+
+> Requirement: "Design for **data consistency** during ingestion" + "Support querying **arbitrary time ranges**"
+
+### The Problem
+
+A PnL indexer must answer: "Is the data I'm showing correct?" In our system, data can be incomplete or inconsistent due to:
+1. **Node downtime** -- gaps in snapshot collection
+2. **API rate limits** -- missed fills for active traders
+3. **10,000 fill cap** -- Hyperliquid truncates historical data
+4. **WebSocket instability** -- reconnection gaps in real-time fill capture
+5. **Trader discovery latency** -- time between a trader's first trade and when we start tracking
+
+### Strategy: Be Honest About What We Know
+
+Rather than silently returning potentially wrong data, every response explicitly states:
+- **Where the data came from** (`pnl_source: "hyperliquid_portfolio" | "our_calculation"`)
+- **Whether our tracking covers the requested timeframe** (`tracking_covers_timeframe: true/false`)
+- **How much data we have** (`fills_in_range`, `snapshots_in_range`)
+- **Known gaps** from downtime (`known_gaps: [{start, end, type}]`)
+- **Nullable fields** when data is unavailable (e.g., `realized_pnl: null` instead of `"0"`)
+
+### Implementation
+
+**Single Source of Truth**: Hyperliquid's `portfolio` API is authoritative for standard timeframes (1d/7d/30d/allTime). Both the leaderboard and individual trader endpoints use it. Our snapshot/fill data supplements with breakdowns when available.
+
+**Gap Detection** (`src/state/gap-detector.ts`):
+- On startup: scans all traders' last snapshot timestamp vs now
+- Gaps > 10 minutes (2x the 5-minute snapshot interval) are recorded in `data_gaps`
+- Exposed in `/v1/status` as `data_integrity.totalUnresolved`
+- Included in every PnL response as `data_status.known_gaps`
+
+**Arbitrary Time Range Queries**:
+- Standard timeframes (1h/1d/7d/30d): use portfolio API, always accurate
+- Custom `from`/`to` ranges: use stored snapshots + fills, with gap warnings
+- If gaps overlap the requested range: response includes them so the consumer can decide whether to trust the data
+
+**Recovery After Restart**:
+1. Gap detector runs immediately, records downtime in DB
+2. Existing snapshots and fills remain intact (no data loss)
+3. Polling resumes, new snapshots start filling in
+4. Gaps can be manually backfilled via `/v1/traders/:address/backfill`
+5. Auto-backfill is not performed (1000+ traders x 20 weight/fill = rate limit)
+
+### What This Means for Consumers
+
+| Scenario | `pnl_source` | Accuracy |
+|----------|-------------|----------|
+| Standard timeframe, portfolio available | `hyperliquid_portfolio` | Exact (same as Hyperliquid leaderboard) |
+| Standard timeframe, portfolio unavailable | `our_calculation` | Sum of fills + unrealized from positions |
+| Custom range, no gaps | `our_calculation` | Exact for realized PnL from stored fills |
+| Custom range, with gaps | `our_calculation` | Partial -- gaps listed in response |
+| Trader never tracked | `our_calculation` | On-demand fetch, may be incomplete |
+
+---
+
 ## Decision Summary
 
 | Topic | Decision | Key Reasoning |
@@ -425,3 +482,4 @@ Subscribe to **coin-level `trades`** WebSocket channels for top 15 coins by volu
 | Data Storage | Trades + Snapshots | Audit trail + read-optimized projections |
 | Rate Budget | Weight-based, 80% target | Correct weights per endpoint, staggered polling |
 | Trade Capture | Coin-level WS for all traders | Bypasses 10-user limit, zero weight cost |
+| Data Consistency | Portfolio API + gap detection | Honest reporting, no silent data gaps |
