@@ -233,9 +233,28 @@ export async function tradersRoutes(fastify: FastifyInstance): Promise<void> {
     const hasFillData = fillsData.length > 0;
     const fillsCapped = fillsData.length >= 2000;
 
+    // ── CONFIDENCE: single summary of data quality ──
+    let confidence: { level: 'high' | 'medium' | 'low' | 'none'; reason: string };
+    if (pnlSource === 'hyperliquid_portfolio') {
+      confidence = { level: 'high', reason: 'Authoritative PnL from Hyperliquid portfolio API' };
+    } else if (hasFillData && trackingCoversTimeframe && knownGaps.length === 0) {
+      confidence = { level: 'medium', reason: 'Computed from fills + positions, full tracking coverage, no gaps' };
+    } else if (hasFillData) {
+      const issues: string[] = [];
+      if (!trackingCoversTimeframe) issues.push('tracking started within requested window');
+      if (knownGaps.length > 0) issues.push(`${knownGaps.length} data gap(s)`);
+      if (fillsCapped) issues.push('fills capped at 2000');
+      confidence = { level: 'low', reason: `Partial data: ${issues.join(', ')}` };
+    } else if (snapshotCount > 0) {
+      confidence = { level: 'low', reason: 'No fills captured, PnL derived from snapshots + current positions only' };
+    } else {
+      confidence = { level: 'none', reason: 'No data available for this time range' };
+    }
+
     return {
       trader: address,
       timeframe: isCustomRange ? `${fromDate.toISOString()} to ${toDate.toISOString()}` : timeframe,
+      confidence,
       data,
       summary: {
         total_pnl: totalPnl.toString(),
@@ -260,11 +279,6 @@ export async function tradersRoutes(fastify: FastifyInstance): Promise<void> {
         funding_payments: fundingData.length,
         snapshots_in_range: snapshotCount,
         known_gaps: knownGaps,
-        note: pnlSource === 'hyperliquid_portfolio'
-          ? 'Total PnL is authoritative from Hyperliquid.'
-          : hasFillData
-            ? 'Total PnL computed from fills + positions. May differ from Hyperliquid for active traders with >10k fills.'
-            : 'Portfolio API unavailable. Showing realized from fills + current unrealized from positions.',
       },
     };
   });

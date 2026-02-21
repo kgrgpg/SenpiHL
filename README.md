@@ -133,6 +133,10 @@ Every PnL response includes metadata about data quality:
 ```json
 {
   "trader": "0x...",
+  "confidence": {
+    "level": "high",
+    "reason": "Authoritative PnL from Hyperliquid portfolio API"
+  },
   "summary": { "total_pnl": "85501.31", "realized_pnl": null, "..." : "..." },
   "data_status": {
     "pnl_source": "hyperliquid_portfolio",
@@ -141,11 +145,18 @@ Every PnL response includes metadata about data quality:
     "tracking_covers_timeframe": false,
     "fills_in_range": 0,
     "snapshots_in_range": 39,
-    "known_gaps": [{ "start": "...", "end": "...", "type": "snapshots" }],
-    "note": "Total PnL is authoritative from Hyperliquid."
+    "known_gaps": [{ "start": "...", "end": "...", "type": "snapshots" }]
   }
 }
 ```
+
+**Confidence levels:**
+| Level | Meaning |
+|-------|---------|
+| `high` | Authoritative from Hyperliquid portfolio API |
+| `medium` | Computed from fills + positions, full tracking coverage, no gaps |
+| `low` | Partial data: incomplete tracking, data gaps, or capped fills |
+| `none` | No data available for this time range |
 
 Fields like `realized_pnl`, `unrealized_pnl`, `volume` are `null` (not `"0"`) when data is unavailable.
 

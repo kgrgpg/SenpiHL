@@ -69,15 +69,21 @@ export async function leaderboardRoutes(fastify: FastifyInstance): Promise<void>
           full_timeframe_coverage: fullCoverage,
           partial_coverage: partialCoverage,
         },
-        data: entries.map((entry) => ({
-          rank: entry.rank,
-          address: entry.address,
-          total_pnl: entry.total_pnl,
-          trade_count: entry.trade_count,
-          tracking_since: entry.tracking_since,
-          data_source: entry.data_source,
-          timeframe_coverage: entry.timeframe_coverage,
-        })),
+        data: entries.map((entry) => {
+          const confidence = entry.data_source === 'hyperliquid_portfolio'
+            ? 'high'
+            : entry.timeframe_coverage === 'full' ? 'medium' : 'low';
+          return {
+            rank: entry.rank,
+            address: entry.address,
+            total_pnl: entry.total_pnl,
+            trade_count: entry.trade_count,
+            tracking_since: entry.tracking_since,
+            data_source: entry.data_source,
+            timeframe_coverage: entry.timeframe_coverage,
+            confidence,
+          };
+        }),
         updated_at: Math.floor(Date.now() / 1000),
       };
     }

@@ -110,8 +110,12 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
                   </td>
                   <td class="px-4 py-2.5 text-right">
                     <span class="text-[9px] px-1 py-0.5 rounded"
-                      :class="entry.data_source === 'hyperliquid_portfolio' ? 'bg-emerald-950 text-emerald-400' : 'bg-amber-950 text-amber-400'"
-                      x-text="entry.data_source === 'hyperliquid_portfolio' ? 'HL' : 'est'"></span>
+                      :class="{
+                        'bg-emerald-950 text-emerald-400': entry.confidence === 'high',
+                        'bg-blue-950 text-blue-400': entry.confidence === 'medium',
+                        'bg-amber-950 text-amber-400': entry.confidence === 'low' || !entry.confidence,
+                      }"
+                      x-text="entry.confidence || 'est'"></span>
                   </td>
                 </tr>
               </template>
@@ -136,8 +140,19 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <!-- Trader Data -->
       <template x-if="traderData">
         <div>
-          <!-- Address -->
-          <div class="text-xs text-slate-500 mb-4 font-mono" x-text="traderAddress"></div>
+          <!-- Address + Confidence badge -->
+          <div class="flex items-center gap-3 mb-4">
+            <div class="text-xs text-slate-500 font-mono" x-text="traderAddress"></div>
+            <span x-show="traderData.confidence" class="text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider"
+              :class="{
+                'bg-emerald-900 text-emerald-300': traderData.confidence?.level === 'high',
+                'bg-blue-900 text-blue-300': traderData.confidence?.level === 'medium',
+                'bg-amber-900 text-amber-300': traderData.confidence?.level === 'low',
+                'bg-red-900 text-red-300': traderData.confidence?.level === 'none',
+              }"
+              x-text="traderData.confidence?.level + ' confidence'"></span>
+          </div>
+          <div x-show="traderData.confidence && traderData.confidence.level !== 'high'" class="mb-3 text-xs text-slate-500 italic" x-text="traderData.confidence?.reason"></div>
 
           <!-- PnL Cards (Our Calculation) -->
           <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-4">
