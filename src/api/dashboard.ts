@@ -156,13 +156,11 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
             </div>
           </div>
 
-          <!-- Verification (Hyperliquid cross-check) -->
-          <div x-show="traderData.verification" class="mb-4 bg-slate-900 border border-slate-800 rounded-lg p-3 flex items-center justify-between">
-            <div class="text-xs text-slate-400">
-              <span class="font-semibold text-slate-300">Hyperliquid says:</span>
-              <span class="ml-2" :class="parseFloat(traderData.verification?.total_pnl || '0') >= 0 ? 'text-emerald-400' : 'text-red-400'" x-text="'$' + fmtPnl(traderData.verification?.total_pnl || '0')"></span>
-            </div>
-            <div class="text-xs" :class="Math.abs(parseFloat(traderData.verification?.delta || '0')) < 100 ? 'text-emerald-400' : 'text-amber-400'" x-text="'Delta: $' + fmtPnl(traderData.verification?.delta || '0')"></div>
+          <!-- Data source info -->
+          <div x-show="traderData.sources" class="mb-4 bg-slate-800/50 rounded-lg px-3 py-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+            <span>Total PnL: <span class="text-slate-400" x-text="traderData.sources?.total_pnl"></span></span>
+            <span>Realized: <span class="text-slate-400" x-text="traderData.sources?.realized_pnl"></span></span>
+            <span>Chart: <span class="text-slate-400" x-text="traderData.sources?.chart"></span></span>
           </div>
 
           <!-- Chart -->

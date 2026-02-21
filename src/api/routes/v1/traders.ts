@@ -120,79 +120,127 @@ export async function tradersRoutes(fastify: FastifyInstance): Promise<void> {
     const fromDate = from ? new Date(parseInt(from) * 1000) : new Date(now - days * 24 * 60 * 60 * 1000);
     const toDate = to ? new Date(parseInt(to) * 1000) : new Date(now);
 
-    const preferredGranularity = granularity ?? (days > 7 ? 'daily' : days > 1 ? 'hourly' : 'raw');
+    // Fetch ALL data fresh from Hyperliquid for this trader + timeframe.
+    // Portfolio gives authoritative total PnL; fills + funding give the breakdown.
+    const portfolioPeriod = timeframe === '1h' ? 'perpDay' : timeframe === '1d' ? 'perpDay' : timeframe === '7d' ? 'perpWeek' : 'perpMonth';
 
-    // ── OUR CALCULATION (primary) ──
-    // Realized PnL from trades table (exact)
-    // Unrealized PnL from snapshots (accurate when from real-time tracking)
-    // Funding PnL from funding_payments table (exact)
-
-    let snapshots = await snapshotsRepo.getForTrader(trader.id, fromDate, toDate, preferredGranularity);
-    if (snapshots.length === 0 && preferredGranularity !== 'raw') {
-      snapshots = await snapshotsRepo.getForTrader(trader.id, fromDate, toDate, 'raw');
-    }
-
-    const [tradeSummary, fundingPnl, dbSummary] = await Promise.all([
-      tradesRepo.getRealizedPnlSummary(trader.id, fromDate, toDate),
-      fundingRepo.getFundingPnl(trader.id, fromDate, toDate),
-      snapshotsRepo.getSummary(trader.id, fromDate, toDate),
+    const [portfolio, fills, funding, clearinghouse] = await Promise.allSettled([
+      firstValueFrom(fetchPortfolio(address)),
+      firstValueFrom(fetchUserFills(address, fromDate.getTime(), toDate.getTime(), 'user')),
+      firstValueFrom(fetchUserFunding(address, fromDate.getTime(), toDate.getTime(), 'user')),
+      firstValueFrom(fetchClearinghouseState(address)),
     ]);
 
-    const latestSnapshot = snapshots[snapshots.length - 1];
-    const currentUnrealized = latestSnapshot?.unrealized_pnl ?? '0';
+    // ── REALIZED PnL (our exact calculation from fills) ──
+    const fillsData = fills.status === 'fulfilled' ? fills.value : [];
+    const fundingData = funding.status === 'fulfilled'
+      ? funding.value.filter(f => f.coin && f.usdc)
+      : [];
 
-    const ourRealizedPnl = toDecimal(tradeSummary.realized_pnl)
-      .plus(toDecimal(fundingPnl))
-      .minus(toDecimal(tradeSummary.total_fees));
-    const ourTotalPnl = ourRealizedPnl.plus(toDecimal(currentUnrealized));
+    let tradingPnl = toDecimal('0');
+    let totalFees = toDecimal('0');
+    let totalVolume = toDecimal('0');
+    for (const f of fillsData) {
+      tradingPnl = tradingPnl.plus(toDecimal(f.closedPnl));
+      totalFees = totalFees.plus(toDecimal(f.fee));
+      totalVolume = totalVolume.plus(toDecimal(f.sz).times(toDecimal(f.px)));
+    }
+    let fundingPnl = toDecimal('0');
+    for (const f of fundingData) {
+      fundingPnl = fundingPnl.plus(toDecimal(f.usdc));
+    }
+    const realizedPnl = tradingPnl.plus(fundingPnl).minus(totalFees);
 
-    // ── HYPERLIQUID VERIFICATION (cross-check) ──
-    const portfolioPeriod = timeframe === '1h' ? 'perpDay' : timeframe === '1d' ? 'perpDay' : timeframe === '7d' ? 'perpWeek' : 'perpMonth';
-    let verification: { total_pnl: string; delta: string; source: string } | undefined;
-
-    try {
-      const portfolio = await firstValueFrom(fetchPortfolio(address));
-      const periodData = portfolio.find(([p]) => p === portfolioPeriod);
-      if (periodData) {
-        const [, info] = periodData;
-        const pnlHistory = info.pnlHistory || [];
-        const hlPnl = pnlHistory.length > 0 ? pnlHistory[pnlHistory.length - 1]![1] : '0';
-        const delta = toDecimal(hlPnl).minus(ourTotalPnl).toString();
-        verification = {
-          total_pnl: hlPnl,
-          delta,
-          source: `Hyperliquid portfolio (${portfolioPeriod})`,
-        };
+    // ── UNREALIZED PnL (current positions) ──
+    let unrealizedPnl = toDecimal('0');
+    let positionCount = 0;
+    if (clearinghouse.status === 'fulfilled') {
+      for (const ap of clearinghouse.value.assetPositions) {
+        unrealizedPnl = unrealizedPnl.plus(toDecimal(ap.position.unrealizedPnl));
       }
-    } catch {
-      // Verification is best-effort, don't fail the request
+      positionCount = clearinghouse.value.assetPositions.length;
     }
 
-    return {
-      trader: address,
-      timeframe,
-      data: snapshots.map(s => ({
+    // ── TOTAL PnL (authoritative from portfolio, with our breakdown) ──
+    let totalPnl = realizedPnl.plus(unrealizedPnl);
+    let portfolioPnl: string | null = null;
+    let pnlHistoryData: Array<[number, string]> = [];
+
+    if (portfolio.status === 'fulfilled') {
+      const periodData = portfolio.value.find(([p]) => p === portfolioPeriod);
+      if (periodData) {
+        const [, info] = periodData;
+        pnlHistoryData = info.pnlHistory || [];
+        if (pnlHistoryData.length > 0) {
+          portfolioPnl = pnlHistoryData[pnlHistoryData.length - 1]![1];
+          totalPnl = toDecimal(portfolioPnl);
+        }
+      }
+    }
+
+    // ── BUILD RESPONSE ──
+    // Time-series data from portfolio pnlHistory (accurate) or our snapshots (fallback)
+    let data;
+    if (pnlHistoryData.length > 0) {
+      data = pnlHistoryData.map(([ts, pnl]) => ({
+        timestamp: Math.floor(ts / 1000),
+        realized_pnl: realizedPnl.toString(),
+        unrealized_pnl: unrealizedPnl.toString(),
+        total_pnl: pnl,
+        positions: positionCount,
+        volume: totalVolume.toString(),
+      }));
+    } else {
+      const preferredGranularity = granularity ?? (days > 7 ? 'daily' : days > 1 ? 'hourly' : 'raw');
+      let snapshots = await snapshotsRepo.getForTrader(trader.id, fromDate, toDate, preferredGranularity);
+      if (snapshots.length === 0 && preferredGranularity !== 'raw') {
+        snapshots = await snapshotsRepo.getForTrader(trader.id, fromDate, toDate, 'raw');
+      }
+      data = snapshots.map(s => ({
         timestamp: Math.floor(new Date(s.timestamp).getTime() / 1000),
         realized_pnl: s.realized_pnl,
         unrealized_pnl: s.unrealized_pnl,
         total_pnl: s.total_pnl,
         positions: s.open_positions,
         volume: s.total_volume,
-      })),
+      }));
+    }
+
+    // Summary: peak and drawdown from pnlHistory or snapshots
+    let peakPnl = totalPnl.toNumber();
+    let troughPnl = totalPnl.toNumber();
+    for (const [, pnl] of pnlHistoryData) {
+      const v = parseFloat(pnl);
+      if (v > peakPnl) peakPnl = v;
+      if (v < troughPnl) troughPnl = v;
+    }
+
+    // Unrealized change = totalPnl - realizedPnl (how much came from price movement)
+    const unrealizedChange = totalPnl.minus(realizedPnl);
+
+    return {
+      trader: address,
+      timeframe,
+      data,
       summary: {
-        realized_pnl: ourRealizedPnl.toString(),
-        unrealized_pnl: currentUnrealized,
-        total_pnl: ourTotalPnl.toString(),
-        funding_pnl: fundingPnl,
-        total_fees: tradeSummary.total_fees,
-        trade_count: tradeSummary.trade_count,
-        volume: tradeSummary.total_volume,
-        peak_pnl: dbSummary?.peakPnl ?? '0',
-        max_drawdown: dbSummary
-          ? toDecimal(dbSummary.troughPnl).minus(toDecimal(dbSummary.peakPnl)).toString()
-          : '0',
+        total_pnl: totalPnl.toString(),
+        realized_pnl: realizedPnl.toString(),
+        unrealized_pnl: unrealizedChange.toString(),
+        funding_pnl: fundingPnl.toString(),
+        trading_pnl: tradingPnl.toString(),
+        total_fees: totalFees.toString(),
+        trade_count: fillsData.length,
+        volume: totalVolume.toString(),
+        positions: positionCount,
+        peak_pnl: peakPnl.toString(),
+        max_drawdown: (troughPnl - peakPnl).toString(),
       },
-      ...(verification && { verification }),
+      sources: {
+        total_pnl: portfolioPnl ? 'hyperliquid_portfolio' : 'our_calculation',
+        realized_pnl: `${fillsData.length} fills + ${fundingData.length} funding payments`,
+        unrealized_pnl: clearinghouse.status === 'fulfilled' ? 'clearinghouseState' : 'unavailable',
+        chart: pnlHistoryData.length > 0 ? 'hyperliquid_pnlHistory' : 'stored_snapshots',
+      },
     };
   });
 

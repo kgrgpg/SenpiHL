@@ -393,13 +393,9 @@ describe('Traders Routes', () => {
       expect(body.summary).toHaveProperty('volume');
     });
 
-    it('should calculate max_drawdown correctly (trough - peak)', async () => {
+    it('should return zero PnL when no data available (API mocked to error)', async () => {
       vi.mocked(snapshotsRepo.getForTrader).mockResolvedValue([]);
-      vi.mocked(snapshotsRepo.getSummary).mockResolvedValue({
-        peakPnl: '5000',
-        troughPnl: '-2000',
-        totalRealized: '3000',
-      });
+      vi.mocked(snapshotsRepo.getSummary).mockResolvedValue(null);
 
       const response = await app.inject({
         method: 'GET',
@@ -407,28 +403,12 @@ describe('Traders Routes', () => {
       });
 
       const body = JSON.parse(response.body);
-      expect(body.summary.max_drawdown).toBe('-7000');
-      expect(body.summary.peak_pnl).toBe('5000');
+      expect(body.summary.realized_pnl).toBe('0');
+      expect(body.summary.total_pnl).toBe('0');
+      expect(body.summary.trade_count).toBe(0);
     });
 
-    it('should handle max_drawdown when all PnL is positive', async () => {
-      vi.mocked(snapshotsRepo.getForTrader).mockResolvedValue([]);
-      vi.mocked(snapshotsRepo.getSummary).mockResolvedValue({
-        peakPnl: '10000',
-        troughPnl: '2000',
-        totalRealized: '8000',
-      });
-
-      const response = await app.inject({
-        method: 'GET',
-        url: `/traders/${VALID_ADDRESS}/pnl`,
-      });
-
-      const body = JSON.parse(response.body);
-      expect(body.summary.max_drawdown).toBe('-8000');
-    });
-
-    it('should return zero summary when no snapshot data exists', async () => {
+    it('should include sources metadata', async () => {
       vi.mocked(snapshotsRepo.getForTrader).mockResolvedValue([]);
       vi.mocked(snapshotsRepo.getSummary).mockResolvedValue(null);
 
@@ -438,32 +418,14 @@ describe('Traders Routes', () => {
       });
 
       const body = JSON.parse(response.body);
-      expect(body.summary.realized_pnl).toBe('0');
-      expect(body.summary.peak_pnl).toBe('0');
-      expect(body.summary.max_drawdown).toBe('0');
-      expect(body.data).toHaveLength(0);
+      expect(body.sources).toBeDefined();
+      expect(body.sources.total_pnl).toBeDefined();
+      expect(body.sources.realized_pnl).toBeDefined();
     });
 
-    it('should include unrealized_pnl from latest snapshot', async () => {
-      vi.mocked(snapshotsRepo.getForTrader).mockResolvedValue([
-        {
-          trader_id: 1,
-          timestamp: new Date(),
-          realized_pnl: '500',
-          unrealized_pnl: '200',
-          total_pnl: '700',
-          funding_pnl: '50',
-          trading_pnl: '450',
-          open_positions: 1,
-          total_volume: '20000',
-          account_value: '5000',
-        },
-      ]);
-      vi.mocked(snapshotsRepo.getSummary).mockResolvedValue({
-        peakPnl: '700',
-        troughPnl: '100',
-        totalRealized: '500',
-      });
+    it('should have all required summary fields', async () => {
+      vi.mocked(snapshotsRepo.getForTrader).mockResolvedValue([]);
+      vi.mocked(snapshotsRepo.getSummary).mockResolvedValue(null);
 
       const response = await app.inject({
         method: 'GET',
@@ -471,7 +433,17 @@ describe('Traders Routes', () => {
       });
 
       const body = JSON.parse(response.body);
-      expect(body.summary.unrealized_pnl).toBe('200');
+      expect(body.summary).toHaveProperty('total_pnl');
+      expect(body.summary).toHaveProperty('realized_pnl');
+      expect(body.summary).toHaveProperty('unrealized_pnl');
+      expect(body.summary).toHaveProperty('funding_pnl');
+      expect(body.summary).toHaveProperty('trading_pnl');
+      expect(body.summary).toHaveProperty('total_fees');
+      expect(body.summary).toHaveProperty('trade_count');
+      expect(body.summary).toHaveProperty('volume');
+      expect(body.summary).toHaveProperty('positions');
+      expect(body.summary).toHaveProperty('peak_pnl');
+      expect(body.summary).toHaveProperty('max_drawdown');
     });
   });
 });
