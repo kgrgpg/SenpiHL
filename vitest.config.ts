@@ -5,6 +5,14 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['src/**/*.test.ts', 'src/**/*.spec.ts'],
+    exclude: [
+      'node_modules/**',
+      'dist/**',
+      // Integration tests require INTEGRATION=1 env var and are excluded from
+      // normal `vitest run`. Run them explicitly via:
+      //   INTEGRATION=1 npx vitest run src/__integration__/
+      ...(process.env.INTEGRATION ? [] : ['src/__integration__/**']),
+    ],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

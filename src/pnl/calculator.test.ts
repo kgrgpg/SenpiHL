@@ -1204,5 +1204,94 @@ describe('PnL Calculator', () => {
       expect(s4.positions.size).toBe(0);
       expect(s4.tradeCount).toBe(4);
     });
+
+    it('should verify PnL across 12-trade scalping sequence', () => {
+      let state = createInitialState(1, '0xScalper');
+
+      // Simulates a trader making rapid BTC scalps over a session.
+      // Each trade: open long → close long (or short → close short)
+      //
+      // Trade  1: Buy  0.5 BTC @ 60000 (open long)
+      // Trade  2: Sell 0.5 BTC @ 60200 (close, PnL: +100)
+      // Trade  3: Sell 1.0 BTC @ 60150 (open short)
+      // Trade  4: Buy  1.0 BTC @ 60050 (close short, PnL: +100)
+      // Trade  5: Buy  2.0 BTC @ 59900 (open long)
+      // Trade  6: Sell 1.0 BTC @ 60100 (partial close, PnL: +200)
+      // Trade  7: Sell 1.0 BTC @ 59700 (close remaining, PnL: -200)
+      // Trade  8: Buy  0.1 BTC @ 59500 (tiny open)
+      // Trade  9: Buy  0.1 BTC @ 59400 (add, avg entry 59450)
+      // Trade 10: Buy  0.1 BTC @ 59300 (add, avg entry = (59450*0.2+59300*0.1)/0.3 = 59400)
+      // Trade 11: Sell 0.3 BTC @ 59600 (close all, PnL: (59600-59400)*0.3 = +60)
+      // Trade 12: Sell 5.0 BTC @ 59800 (open short, no PnL)
+      // Expected cumulative: 100 + 100 + 200 - 200 + 60 = 260
+
+      const trades: Array<{ side: 'B' | 'A'; size: string; price: string; expectedPnl: number }> = [
+        { side: 'B', size: '0.5',  price: '60000', expectedPnl: 0 },
+        { side: 'A', size: '0.5',  price: '60200', expectedPnl: 100 },
+        { side: 'A', size: '1.0',  price: '60150', expectedPnl: 0 },
+        { side: 'B', size: '1.0',  price: '60050', expectedPnl: 100 },
+        { side: 'B', size: '2.0',  price: '59900', expectedPnl: 0 },
+        { side: 'A', size: '1.0',  price: '60100', expectedPnl: 200 },
+        { side: 'A', size: '1.0',  price: '59700', expectedPnl: -200 },
+        { side: 'B', size: '0.1',  price: '59500', expectedPnl: 0 },
+        { side: 'B', size: '0.1',  price: '59400', expectedPnl: 0 },
+        { side: 'B', size: '0.1',  price: '59300', expectedPnl: 0 },
+        { side: 'A', size: '0.3',  price: '59600', expectedPnl: 60 },
+        { side: 'A', size: '5.0',  price: '59800', expectedPnl: 0 },
+      ];
+
+      for (let i = 0; i < trades.length; i++) {
+        const t = trades[i]!;
+        const fill = computeFillFromWsTrade(
+          'BTC', toDecimal(t.price), toDecimal(t.size), t.side,
+          '0xScalper', i + 1, Date.now() + i, state
+        );
+        expect(fill.closedPnl.toNumber()).toBeCloseTo(t.expectedPnl, 2);
+        state = applyTrade(state, fill);
+        updatePositionFromFill(state, 'BTC', t.side, toDecimal(t.size), toDecimal(t.price));
+      }
+
+      expect(state.realizedTradingPnl.toNumber()).toBeCloseTo(260, 2);
+      expect(state.tradeCount).toBe(12);
+      expect(state.totalFees.toNumber()).toBe(0); // WsTrade fills have 0 fee
+      expect(state.positions.get('BTC')!.size.toNumber()).toBe(-5);
+      expect(state.positions.get('BTC')!.entryPrice.toNumber()).toBe(59800);
+    });
+
+    it('should handle funding payments in total PnL', () => {
+      let state = createInitialState(1, '0xFunding');
+
+      // Open long, receive funding, close
+      const f1 = computeFillFromWsTrade(
+        'BTC', toDecimal('50000'), toDecimal('1'), 'B', '0xFunding',
+        1, Date.now(), state
+      );
+      state = applyTrade(state, f1);
+      updatePositionFromFill(state, 'BTC', 'B', toDecimal('1'), toDecimal('50000'));
+
+      // Apply funding: -$25 (paying funding to shorts)
+      state = applyFunding(state, {
+        coin: 'BTC',
+        payment: toDecimal('-25'),
+        positionSize: toDecimal('1'),
+        timestamp: new Date(),
+        fundingRate: toDecimal('0.0001'),
+      });
+
+      // Close at profit
+      const f2 = computeFillFromWsTrade(
+        'BTC', toDecimal('51000'), toDecimal('1'), 'A', '0xFunding',
+        2, Date.now(), state
+      );
+      expect(f2.closedPnl.toNumber()).toBe(1000);
+      state = applyTrade(state, f2);
+      updatePositionFromFill(state, 'BTC', 'A', toDecimal('1'), toDecimal('51000'));
+
+      expect(state.realizedTradingPnl.toNumber()).toBe(1000);
+      expect(state.realizedFundingPnl.toNumber()).toBe(-25);
+      // total realized = trading + funding = 1000 - 25 = 975
+      const calc = calculatePnL(state, []);
+      expect(calc.realizedPnl.toNumber()).toBe(975);
+    });
   });
 });
