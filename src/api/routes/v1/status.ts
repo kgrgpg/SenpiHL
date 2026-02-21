@@ -7,6 +7,7 @@ import { getHyperliquidWebSocket } from '../../../hyperliquid/websocket.js';
 import { getTrackedTraderCount, getAllTrackedAddresses } from '../../../state/trader-state.js';
 import { query } from '../../../storage/db/client.js';
 import { rateBudget } from '../../../utils/rate-budget.js';
+import { getPriceCount } from '../../../state/price-service.js';
 
 export async function statusRoutes(fastify: FastifyInstance): Promise<void> {
   /**
@@ -48,6 +49,10 @@ export async function statusRoutes(fastify: FastifyInstance): Promise<void> {
         queue_pending: parseInt(discoveryQueueCount.rows[0]?.count ?? '0'),
         is_running: false,
         discovered_count: 0,
+        fills_captured: 0,
+      },
+      price_service: {
+        coins_tracked: getPriceCount(),
       },
       rate_budget: rateBudget.getStats(),
       config: {
@@ -65,6 +70,8 @@ export async function statusRoutes(fastify: FastifyInstance): Promise<void> {
       baseStatus.connections.websocket.hybrid_subscriptions = hybridStream.traderCount;
       baseStatus.discovery.is_running = discoveryStream.isRunning;
       baseStatus.discovery.discovered_count = discoveryStream.discoveredCount;
+      const discoveryStats = discoveryStream.getStats();
+      baseStatus.discovery.fills_captured = discoveryStats.fillsCaptured;
     }
 
     return baseStatus;

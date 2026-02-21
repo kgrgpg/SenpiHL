@@ -36,13 +36,13 @@ import { logger } from '../../utils/logger.js';
 
 interface WsTrade {
   coin: string;
-  side: 'B' | 'A';   // taker side
+  side: 'B' | 'A';   // taker side (irrelevant for us, users array defines roles)
   px: string;         // price
   sz: string;         // size
   hash: string;       // tx hash
   time: number;       // timestamp ms
   tid: number;
-  users: [string, string]; // [maker, taker]
+  users: [string, string]; // [buyer, seller] per Hyperliquid docs
 }
 
 // Top coins by volume for trade capture (kept to ~8 to stay within WS subscription budget)
@@ -134,9 +134,8 @@ export class TraderDiscoveryStream {
 
   /**
    * Subscribe to WebSocket trades for discovery + fill capture (zero rate limit cost).
-   * Each trade event contains [maker, taker] addresses.
-   * - Maker has the opposite side of trade.side
-   * - Taker has the same side as trade.side
+   * Each trade event contains users: [buyer, seller] per Hyperliquid docs.
+   * Buyer always has side 'B', seller always has side 'A'.
    */
   private startWebSocketDiscovery(): void {
     const ws = getHyperliquidWebSocket();
@@ -154,16 +153,14 @@ export class TraderDiscoveryStream {
           for (const trade of rawTrades as WsTrade[]) {
             if (!trade.users || trade.users.length < 2) continue;
 
-            const [maker, taker] = trade.users;
+            // Per Hyperliquid docs: users is always [buyer, seller]
+            const [buyer, seller] = trade.users;
 
-            this.checkAddress(maker, coin);
-            this.checkAddress(taker, coin);
+            this.checkAddress(buyer, coin);
+            this.checkAddress(seller, coin);
 
-            const makerSide: 'B' | 'A' = trade.side === 'B' ? 'A' : 'B';
-            const takerSide: 'B' | 'A' = trade.side;
-
-            this.processFillForTrader(maker, coin, trade, makerSide);
-            this.processFillForTrader(taker, coin, trade, takerSide);
+            this.processFillForTrader(buyer, coin, trade, 'B');
+            this.processFillForTrader(seller, coin, trade, 'A');
           }
         });
     }

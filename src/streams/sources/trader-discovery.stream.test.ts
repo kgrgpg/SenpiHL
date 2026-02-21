@@ -263,7 +263,8 @@ describe('TraderDiscoveryStream', () => {
       stream = new TraderDiscoveryStream();
       await stream.start();
 
-      // Emit a trade with a tracked trader via the BTC subscription
+      // Emit a trade: users is [buyer, seller] per HL docs
+      // 0xtracked is the seller (index 1), gets side 'A'
       btcSubject.next([{
         coin: 'BTC',
         side: 'B',
@@ -272,16 +273,19 @@ describe('TraderDiscoveryStream', () => {
         hash: '0xhash',
         time: Date.now(),
         tid: 12345,
-        users: ['0xmaker', '0xtracked'],
+        users: ['0xbuyer', '0xtracked'],
       }]);
 
-      // Allow async operations to settle
       await new Promise((r) => setTimeout(r, 50));
 
       expect(stream.getStats().fillsCaptured).toBe(1);
 
       const { tradesRepo } = await import('../../storage/db/repositories/trades.repo.js');
       expect(tradesRepo.insert).toHaveBeenCalledTimes(1);
+
+      // Verify the fill was persisted with correct seller side
+      const insertCall = vi.mocked(tradesRepo.insert).mock.calls[0]![0];
+      expect(insertCall.side).toBe('A');
 
       stream.stop();
     });

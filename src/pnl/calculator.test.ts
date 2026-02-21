@@ -1064,4 +1064,145 @@ describe('PnL Calculator', () => {
       expect(pos.entryPrice.toNumber()).toBe(50000);
     });
   });
+
+  describe('multi-trade PnL accumulation (end-to-end)', () => {
+    it('should correctly accumulate PnL across open → partial close → full close', () => {
+      const state = createInitialState(1, '0xTrader');
+
+      // Trade 1: Open long 2 BTC @ 40000
+      const fill1 = computeFillFromWsTrade(
+        'BTC', toDecimal('40000'), toDecimal('2'), 'B', '0xTrader',
+        1, Date.now(), state
+      );
+      expect(fill1.closedPnl.toNumber()).toBe(0);
+      const s1 = applyTrade(state, fill1);
+      updatePositionFromFill(s1, 'BTC', 'B', toDecimal('2'), toDecimal('40000'));
+
+      expect(s1.realizedTradingPnl.toNumber()).toBe(0);
+      expect(s1.tradeCount).toBe(1);
+      expect(s1.positions.get('BTC')!.size.toNumber()).toBe(2);
+
+      // Trade 2: Partial close — sell 1 BTC @ 45000 (profit $5000)
+      const fill2 = computeFillFromWsTrade(
+        'BTC', toDecimal('45000'), toDecimal('1'), 'A', '0xTrader',
+        2, Date.now(), s1
+      );
+      expect(fill2.closedPnl.toNumber()).toBe(5000);
+      const s2 = applyTrade(s1, fill2);
+      updatePositionFromFill(s2, 'BTC', 'A', toDecimal('1'), toDecimal('45000'));
+
+      expect(s2.realizedTradingPnl.toNumber()).toBe(5000);
+      expect(s2.tradeCount).toBe(2);
+      expect(s2.positions.get('BTC')!.size.toNumber()).toBe(1);
+      expect(s2.positions.get('BTC')!.entryPrice.toNumber()).toBe(40000);
+
+      // Trade 3: Full close — sell remaining 1 BTC @ 35000 (loss $5000)
+      const fill3 = computeFillFromWsTrade(
+        'BTC', toDecimal('35000'), toDecimal('1'), 'A', '0xTrader',
+        3, Date.now(), s2
+      );
+      expect(fill3.closedPnl.toNumber()).toBe(-5000);
+      const s3 = applyTrade(s2, fill3);
+      updatePositionFromFill(s3, 'BTC', 'A', toDecimal('1'), toDecimal('35000'));
+
+      expect(s3.realizedTradingPnl.toNumber()).toBe(0);
+      expect(s3.tradeCount).toBe(3);
+      expect(s3.positions.has('BTC')).toBe(false);
+    });
+
+    it('should handle short position lifecycle correctly', () => {
+      const state = createInitialState(1, '0xShort');
+
+      // Open short 5 ETH @ 3000
+      const fill1 = computeFillFromWsTrade(
+        'ETH', toDecimal('3000'), toDecimal('5'), 'A', '0xShort',
+        10, Date.now(), state
+      );
+      expect(fill1.closedPnl.toNumber()).toBe(0);
+      const s1 = applyTrade(state, fill1);
+      updatePositionFromFill(s1, 'ETH', 'A', toDecimal('5'), toDecimal('3000'));
+
+      expect(s1.positions.get('ETH')!.size.toNumber()).toBe(-5);
+
+      // Close short — buy 5 ETH @ 2500 (profit = (2500-3000)*5*-1 = 2500)
+      const fill2 = computeFillFromWsTrade(
+        'ETH', toDecimal('2500'), toDecimal('5'), 'B', '0xShort',
+        11, Date.now(), s1
+      );
+      expect(fill2.closedPnl.toNumber()).toBe(2500);
+      const s2 = applyTrade(s1, fill2);
+      updatePositionFromFill(s2, 'ETH', 'B', toDecimal('5'), toDecimal('2500'));
+
+      expect(s2.realizedTradingPnl.toNumber()).toBe(2500);
+      expect(s2.positions.has('ETH')).toBe(false);
+    });
+
+    it('should handle position flip with correct PnL split', () => {
+      const state = createInitialState(1, '0xFlip');
+
+      // Open long 2 BTC @ 50000
+      const fill1 = computeFillFromWsTrade(
+        'BTC', toDecimal('50000'), toDecimal('2'), 'B', '0xFlip',
+        20, Date.now(), state
+      );
+      const s1 = applyTrade(state, fill1);
+      updatePositionFromFill(s1, 'BTC', 'B', toDecimal('2'), toDecimal('50000'));
+
+      // Flip: sell 5 BTC @ 55000 (closes long 2 for +10000, opens short 3)
+      const fill2 = computeFillFromWsTrade(
+        'BTC', toDecimal('55000'), toDecimal('5'), 'A', '0xFlip',
+        21, Date.now(), s1
+      );
+      // closedPnl only on the close portion (min(5, |2|) = 2):
+      // (55000 - 50000) * 2 * 1 = 10000
+      expect(fill2.closedPnl.toNumber()).toBe(10000);
+      const s2 = applyTrade(s1, fill2);
+      updatePositionFromFill(s2, 'BTC', 'A', toDecimal('5'), toDecimal('55000'));
+
+      expect(s2.realizedTradingPnl.toNumber()).toBe(10000);
+      expect(s2.positions.get('BTC')!.size.toNumber()).toBe(-3);
+      expect(s2.positions.get('BTC')!.entryPrice.toNumber()).toBe(55000);
+    });
+
+    it('should track multiple coins independently', () => {
+      const state = createInitialState(1, '0xMulti');
+
+      // Open BTC long 1 @ 40000
+      const f1 = computeFillFromWsTrade(
+        'BTC', toDecimal('40000'), toDecimal('1'), 'B', '0xMulti', 30, Date.now(), state
+      );
+      const s1 = applyTrade(state, f1);
+      updatePositionFromFill(s1, 'BTC', 'B', toDecimal('1'), toDecimal('40000'));
+
+      // Open ETH short 10 @ 2000
+      const f2 = computeFillFromWsTrade(
+        'ETH', toDecimal('2000'), toDecimal('10'), 'A', '0xMulti', 31, Date.now(), s1
+      );
+      const s2 = applyTrade(s1, f2);
+      updatePositionFromFill(s2, 'ETH', 'A', toDecimal('10'), toDecimal('2000'));
+
+      expect(s2.positions.size).toBe(2);
+
+      // Close BTC @ 42000 (+2000)
+      const f3 = computeFillFromWsTrade(
+        'BTC', toDecimal('42000'), toDecimal('1'), 'A', '0xMulti', 32, Date.now(), s2
+      );
+      expect(f3.closedPnl.toNumber()).toBe(2000);
+      const s3 = applyTrade(s2, f3);
+      updatePositionFromFill(s3, 'BTC', 'A', toDecimal('1'), toDecimal('42000'));
+
+      // Close ETH @ 2100 (loss: (2100-2000)*10*-1 = -1000)
+      const f4 = computeFillFromWsTrade(
+        'ETH', toDecimal('2100'), toDecimal('10'), 'B', '0xMulti', 33, Date.now(), s3
+      );
+      expect(f4.closedPnl.toNumber()).toBe(-1000);
+      const s4 = applyTrade(s3, f4);
+      updatePositionFromFill(s4, 'ETH', 'B', toDecimal('10'), toDecimal('2100'));
+
+      // Net PnL: 2000 - 1000 = 1000
+      expect(s4.realizedTradingPnl.toNumber()).toBe(1000);
+      expect(s4.positions.size).toBe(0);
+      expect(s4.tradeCount).toBe(4);
+    });
+  });
 });

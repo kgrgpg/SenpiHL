@@ -5,9 +5,14 @@
  * an in-memory cache of current mid prices for all coins.
  * Zero API weight cost (WebSocket push-based).
  *
- * Used for:
- * - Computing unrealized PnL from position state
- * - Computing closedPnl when processing trades from coin-level WS
+ * Currently used by:
+ * - Status API: exposes price count for monitoring
+ * - Future: real-time unrealized PnL estimation between clearinghouseState polls
+ *
+ * Note: Authoritative unrealized PnL comes from clearinghouseState (5-min poll).
+ * This service enables sub-second unrealized PnL approximation using locally
+ * tracked positions + live mark prices. Not wired into PnL API yet because
+ * the reconciliation approach (clearinghouseState) is more accurate.
  */
 
 import { Subject } from 'rxjs';
