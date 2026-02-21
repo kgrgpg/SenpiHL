@@ -208,20 +208,25 @@ describe('Hyperliquid Client', () => {
     });
 
     describe('fetchUserFunding', () => {
-      it('should fetch and return user funding', async () => {
-        const mockFunding = [
+      it('should fetch and unwrap delta-wrapped funding data', async () => {
+        const mockRawFunding = [
           {
-            coin: 'BTC',
-            fundingRate: '0.0001',
-            usdc: '10.5',
-            szi: '1.5',
             time: 1700000000000,
+            hash: '0x0000',
+            delta: {
+              type: 'funding',
+              coin: 'BTC',
+              fundingRate: '0.0001',
+              usdc: '10.5',
+              szi: '1.5',
+              nSamples: null,
+            },
           },
         ];
 
         mockFetch.mockResolvedValueOnce({
           ok: true,
-          json: () => Promise.resolve(mockFunding),
+          json: () => Promise.resolve(mockRawFunding),
         });
 
         const resultPromise = firstValueFrom(
@@ -234,22 +239,28 @@ describe('Hyperliquid Client', () => {
         expect(result).toHaveLength(1);
         expect(result[0]?.coin).toBe('BTC');
         expect(result[0]?.usdc).toBe('10.5');
+        expect(result[0]?.time).toBe(1700000000000);
       });
 
       it('should handle negative funding rates', async () => {
-        const mockFunding = [
+        const mockRawFunding = [
           {
-            coin: 'ETH',
-            fundingRate: '-0.0005',
-            usdc: '-25.5',
-            szi: '10',
             time: 1700000000000,
+            hash: '0x0000',
+            delta: {
+              type: 'funding',
+              coin: 'ETH',
+              fundingRate: '-0.0005',
+              usdc: '-25.5',
+              szi: '10',
+              nSamples: null,
+            },
           },
         ];
 
         mockFetch.mockResolvedValueOnce({
           ok: true,
-          json: () => Promise.resolve(mockFunding),
+          json: () => Promise.resolve(mockRawFunding),
         });
 
         const resultPromise = firstValueFrom(

@@ -55,6 +55,19 @@ export interface HyperliquidFill {
   liquidation?: boolean;
 }
 
+export interface HyperliquidFundingRaw {
+  time: number;
+  hash: string;
+  delta: {
+    type: string;
+    coin: string;
+    usdc: string;
+    szi: string;
+    fundingRate: string;
+    nSamples: number | null;
+  };
+}
+
 export interface HyperliquidFunding {
   coin: string;
   fundingRate: string;

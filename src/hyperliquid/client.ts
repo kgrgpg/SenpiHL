@@ -10,6 +10,7 @@ import type {
   HyperliquidClearinghouseState,
   HyperliquidFill,
   HyperliquidFunding,
+  HyperliquidFundingRaw,
   HyperliquidInfoRequest,
   HyperliquidPortfolio,
 } from './types.js';
@@ -131,7 +132,15 @@ export function fetchUserFunding(
     ...(endTime && { endTime }),
   };
 
-  return from(postInfo<HyperliquidFunding[]>(request, priority)).pipe(
+  return from(postInfo<HyperliquidFundingRaw[]>(request, priority)).pipe(
+    // Unwrap the delta object: API returns {time, delta: {coin, usdc, szi, fundingRate}}
+    map(rawFunding => rawFunding.map(f => ({
+      coin: f.delta.coin,
+      fundingRate: f.delta.fundingRate,
+      usdc: f.delta.usdc,
+      szi: f.delta.szi,
+      time: f.time,
+    }))),
     tap(funding =>
       logger.debug({ user: userAddress, count: funding.length }, 'Fetched user funding')
     ),
