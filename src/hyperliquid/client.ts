@@ -1,4 +1,4 @@
-import { Observable, from, throwError, timer } from 'rxjs';
+import { Observable, from, throwError, timer, firstValueFrom as rxFirstValueFrom } from 'rxjs';
 import { catchError, map, retry, tap } from 'rxjs/operators';
 
 import { config } from '../utils/config.js';
@@ -42,7 +42,7 @@ async function postInfo<T>(request: HyperliquidInfoRequest, priority: RequestPri
   // Wait if over budget -- backfill/polling back off, user requests always proceed
   let attempts = 0;
   while (!rateBudget.record(priority, weight) && priority !== 'user' && attempts < 30) {
-    await new Promise(r => setTimeout(r, 2000 + Math.random() * 3000));
+    await rxFirstValueFrom(timer(2000 + Math.random() * 3000));
     attempts++;
   }
   // User requests always record even if over budget

@@ -106,8 +106,8 @@ function processHybridFill(address: string, fill: WebSocketFill): SnapshotData |
   state = applyTrade(state, trade);
   setTraderState(address, state);
 
-  // Persist trade to DB (non-blocking)
-  tradesRepo.insert({
+  // Persist trade to DB (non-blocking, RxJS error handling)
+  from(tradesRepo.insert({
     traderId: state.traderId,
     coin: trade.coin,
     side: trade.side,
@@ -119,7 +119,12 @@ function processHybridFill(address: string, fill: WebSocketFill): SnapshotData |
     txHash: fill.hash,
     oid: fill.oid,
     tid: trade.tid,
-  }).catch(err => logger.warn({ err: (err as Error).message, tid: trade.tid }, 'Failed to persist trade'));
+  })).pipe(
+    catchError(err => {
+      logger.warn({ err: (err as Error).message, tid: trade.tid }, 'Failed to persist trade');
+      return EMPTY;
+    })
+  ).subscribe();
 
   return createSnapshot(state);
 }

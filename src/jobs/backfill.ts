@@ -6,8 +6,8 @@
  */
 
 import { Queue, Worker, Job } from 'bullmq';
-import { firstValueFrom, from, forkJoin, of, Observable } from 'rxjs';
-import { mergeMap, map, catchError, delay, mergeScan, reduce } from 'rxjs/operators';
+import { firstValueFrom, from, forkJoin, of, Observable, interval, Subject } from 'rxjs';
+import { mergeMap, map, catchError, delay, mergeScan, reduce, takeUntil, tap } from 'rxjs/operators';
 
 import { fetchUserFills, fetchUserFunding } from '../hyperliquid/client.js';
 import { rateBudget } from '../utils/rate-budget.js';
@@ -251,17 +251,21 @@ export function createBackfillWorker(): Worker<BackfillJobData> {
     concurrency: initialWorkers,
   });
 
-  // Adjust concurrency every 10 seconds based on rate budget
-  const adjustInterval = setInterval(() => {
-    const recommended = rateBudget.getRecommendedWorkers();
-    if (recommended !== worker.concurrency) {
-      logger.info(
-        { from: worker.concurrency, to: recommended, ...rateBudget.getStats() },
-        'Adjusting backfill worker concurrency'
-      );
-      worker.concurrency = recommended;
-    }
-  }, 10_000);
+  // Adjust concurrency every 10 seconds based on rate budget (RxJS interval)
+  const workerDestroy$ = new Subject<void>();
+  interval(10_000).pipe(
+    takeUntil(workerDestroy$),
+    tap(() => {
+      const recommended = rateBudget.getRecommendedWorkers();
+      if (recommended !== worker.concurrency) {
+        logger.info(
+          { from: worker.concurrency, to: recommended, ...rateBudget.getStats() },
+          'Adjusting backfill worker concurrency'
+        );
+        worker.concurrency = recommended;
+      }
+    })
+  ).subscribe();
 
   worker.on('completed', (job) => {
     logger.info({ jobId: job.id, address: job.data.address }, 'Backfill job completed');
@@ -278,7 +282,7 @@ export function createBackfillWorker(): Worker<BackfillJobData> {
     logger.debug({ jobId: job.id, progress }, 'Backfill job progress');
   });
 
-  worker.on('closing', () => clearInterval(adjustInterval));
+  worker.on('closing', () => workerDestroy$.next());
 
   return worker;
 }

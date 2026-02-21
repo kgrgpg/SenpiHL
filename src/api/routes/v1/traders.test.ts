@@ -408,7 +408,7 @@ describe('Traders Routes', () => {
       expect(body.summary.trade_count).toBe(0);
     });
 
-    it('should include sources metadata', async () => {
+    it('should include accuracy metadata', async () => {
       vi.mocked(snapshotsRepo.getForTrader).mockResolvedValue([]);
       vi.mocked(snapshotsRepo.getSummary).mockResolvedValue(null);
 
@@ -418,9 +418,9 @@ describe('Traders Routes', () => {
       });
 
       const body = JSON.parse(response.body);
-      expect(body.sources).toBeDefined();
-      expect(body.sources.total_pnl).toBeDefined();
-      expect(body.sources.realized_pnl).toBeDefined();
+      expect(body.accuracy).toBeDefined();
+      expect(body.accuracy.total_pnl).toBeDefined();
+      expect(body.accuracy.realized_pnl).toBeDefined();
     });
 
     it('should have all required summary fields', async () => {

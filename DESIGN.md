@@ -303,6 +303,61 @@ Full analysis: [RATE_LIMIT_ANALYSIS.md](./RATE_LIMIT_ANALYSIS.md)
 
 ---
 
+## 11. PnL Data Availability and Accuracy
+
+### What We Can Compute Accurately
+
+| Component | Accuracy | Source | Limitation |
+|-----------|----------|--------|------------|
+| **Realized PnL** (any interval) | Exact | `SUM(closedPnl) - fees + funding` from fills | 10,000 most recent fills only |
+| **Funding PnL** (any interval) | Exact | `SUM(usdc)` from funding payments | 500 per response, paginated |
+| **Total PnL** (1d/7d/30d) | Exact | Hyperliquid `portfolio` endpoint | Fixed timeframes only |
+| **Unrealized PnL** (current) | Exact | `clearinghouseState` | Point-in-time snapshot |
+| **Unrealized PnL change** (past) | Not available | Would require historical mark prices | Only via stored snapshots |
+
+### How Each Query Type Works
+
+**Standard timeframes (1d, 7d, 30d):**
+- `total_pnl`: from portfolio (authoritative, includes unrealized changes)
+- Realized breakdown: from fills + funding (exact)
+- Unrealized change: derived (total - realized)
+- Accuracy: **exact** for all components
+
+**Custom from/to ranges (with stored snapshots):**
+- `total_pnl`: from snapshot delta (includes unrealized at snapshot times)
+- Realized breakdown: from fills + funding
+- Accuracy: **exact** for realized, **approximate** for unrealized (depends on snapshot frequency)
+
+**Custom from/to ranges (without snapshots):**
+- Realized PnL: from fills + funding (exact)
+- Unrealized PnL change: **not available** -- requires positions + mark prices at both timestamps
+- Accuracy: **partial** -- realized only
+
+### API Response Accuracy Labels
+
+Every PnL response includes an `accuracy` object:
+```json
+{
+  "accuracy": {
+    "total_pnl": { "level": "exact", "source": "Hyperliquid portfolio (perpWeek)" },
+    "realized_pnl": { "level": "exact", "source": "1845 fills + 168 funding payments" },
+    "unrealized_pnl": { "level": "exact", "source": "derived from portfolio total minus realized" }
+  }
+}
+```
+
+Levels: `exact` (authoritative), `partial` (realized only), `estimate` (approximate), `unavailable`.
+
+### Data Completeness Over Time
+
+The longer the system runs, the more complete the data:
+- **Day 1**: Standard timeframes only (via portfolio API)
+- **Day 7**: Custom ranges within last 7 days (from stored snapshots)
+- **Day 30+**: Near-complete history for all tracked traders
+- **Real-time**: All fills captured via WebSocket for top 10 traders + polling for all
+
+---
+
 ## Decision Summary
 
 | Topic | Decision | Key Reasoning |

@@ -218,28 +218,50 @@ export async function tradersRoutes(fastify: FastifyInstance): Promise<void> {
     // Unrealized change = totalPnl - realizedPnl (how much came from price movement)
     const unrealizedChange = totalPnl.minus(realizedPnl);
 
+    // Determine if this is a standard timeframe (portfolio available) or custom range
+    const isStandardTimeframe = !from && !to;
+    const hasPortfolio = portfolioPnl !== null;
+
     return {
       trader: address,
       timeframe,
       data,
       summary: {
+        // Total PnL: includes both realized and unrealized changes
         total_pnl: totalPnl.toString(),
+
+        // Realized PnL breakdown (exact -- computed from individual fills + funding)
         realized_pnl: realizedPnl.toString(),
-        unrealized_pnl: unrealizedChange.toString(),
-        funding_pnl: fundingPnl.toString(),
         trading_pnl: tradingPnl.toString(),
+        funding_pnl: fundingPnl.toString(),
         total_fees: totalFees.toString(),
+
+        // Unrealized PnL change (derived: total - realized)
+        // This represents price movement impact on open positions
+        unrealized_pnl: unrealizedChange.toString(),
+
+        // Current state
+        positions: positionCount,
         trade_count: fillsData.length,
         volume: totalVolume.toString(),
-        positions: positionCount,
         peak_pnl: peakPnl.toString(),
         max_drawdown: (troughPnl - peakPnl).toString(),
       },
-      sources: {
-        total_pnl: portfolioPnl ? 'hyperliquid_portfolio' : 'our_calculation',
-        realized_pnl: `${fillsData.length} fills + ${fundingData.length} funding payments`,
-        unrealized_pnl: clearinghouse.status === 'fulfilled' ? 'clearinghouseState' : 'unavailable',
-        chart: pnlHistoryData.length > 0 ? 'hyperliquid_pnlHistory' : 'stored_snapshots',
+      accuracy: {
+        total_pnl: hasPortfolio
+          ? { level: 'exact', source: `Hyperliquid portfolio (${portfolioPeriod})` }
+          : { level: 'partial', source: 'our_calculation (realized only, unrealized may be stale)' },
+        realized_pnl: {
+          level: 'exact',
+          source: `SUM(closedPnl) from ${fillsData.length} fills + SUM(funding) from ${fundingData.length} payments - SUM(fees)`,
+          note: fillsData.length >= 2000 ? 'Response capped at 2000 fills per request; actual count may be higher' : undefined,
+        },
+        unrealized_pnl: hasPortfolio
+          ? { level: 'exact', source: 'derived from portfolio total minus realized' }
+          : { level: 'estimate', source: 'current unrealized from clearinghouseState (point-in-time, not change over interval)' },
+        chart: pnlHistoryData.length > 0
+          ? { level: 'exact', source: 'Hyperliquid pnlHistory time series' }
+          : { level: 'approximate', source: 'stored snapshots (resolution depends on tracking duration)' },
       },
     };
   });

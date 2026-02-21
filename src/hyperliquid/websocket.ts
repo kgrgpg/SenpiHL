@@ -16,7 +16,7 @@
  * - Need reconnection logic for reliability
  */
 
-import { Observable, Subject, BehaviorSubject, timer, EMPTY } from 'rxjs';
+import { Observable, Subject, BehaviorSubject, timer, interval, EMPTY } from 'rxjs';
 import {
   filter,
   map,
@@ -79,7 +79,6 @@ export class HyperliquidWebSocket {
   private reconnectAttempts = 0;
   private readonly maxReconnectAttempts = 10;
   private readonly baseReconnectDelay = 1000;
-  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     this.setupAutoReconnect();
@@ -143,7 +142,6 @@ export class HyperliquidWebSocket {
       this.ws.on('close', (code, reason) => {
         logger.warn({ code, reason: reason.toString() }, 'WebSocket disconnected');
         this.connectionState.next('disconnected');
-        this.stopHeartbeat();
         this.ws = null;
       });
 
@@ -161,7 +159,6 @@ export class HyperliquidWebSocket {
    */
   disconnect(): void {
     this.destroy$.next();
-    this.stopHeartbeat();
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -172,19 +169,14 @@ export class HyperliquidWebSocket {
   }
 
   private startHeartbeat(): void {
-    this.stopHeartbeat();
-    this.heartbeatInterval = setInterval(() => {
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ method: 'ping' }));
-      }
-    }, 30_000); // 30s, well under 60s server timeout
-  }
-
-  private stopHeartbeat(): void {
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-      this.heartbeatInterval = null;
-    }
+    interval(30_000).pipe(
+      takeUntil(this.destroy$),
+      tap(() => {
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({ method: 'ping' }));
+        }
+      })
+    ).subscribe();
   }
 
   /**
