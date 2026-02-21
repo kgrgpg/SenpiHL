@@ -22,10 +22,13 @@ import {
   parsePositionFromApi,
   updatePositions,
   calculatePnL,
+  calculateSummaryStats,
+  calculateLiveUnrealizedPnl,
 } from '../../../pnl/calculator.js';
 import { toDecimal } from '../../../utils/decimal.js';
 import { config } from '../../../utils/config.js';
 import { logger } from '../../../utils/logger.js';
+import { getMarkPrice, getPriceCount } from '../../../state/price-service.js';
 
 interface PnLQueryParams {
   timeframe?: '1h' | '1d' | '7d' | '30d';
@@ -202,14 +205,9 @@ export async function tradersRoutes(fastify: FastifyInstance): Promise<void> {
       }));
     }
 
-    // Peak / drawdown from history
-    let peakPnl = totalPnl.toNumber();
-    let troughPnl = totalPnl.toNumber();
-    for (const [, pnl] of pnlHistoryData) {
-      const v = parseFloat(pnl);
-      if (v > peakPnl) peakPnl = v;
-      if (v < troughPnl) troughPnl = v;
-    }
+    const summaryStats = calculateSummaryStats(pnlHistoryData, totalPnl.toNumber());
+    const peakPnl = summaryStats.peakPnl;
+    const maxDrawdown = summaryStats.maxDrawdown;
 
     // ── DATA STATUS: report exactly what we have ──
     const trackingSince = trader.first_seen_at ? new Date(trader.first_seen_at) : null;
@@ -267,7 +265,7 @@ export async function tradersRoutes(fastify: FastifyInstance): Promise<void> {
         trade_count: fillsData.length,
         volume: hasFillData ? totalVolume.toString() : null,
         peak_pnl: peakPnl.toString(),
-        max_drawdown: (troughPnl - peakPnl).toString(),
+        max_drawdown: (-maxDrawdown).toString(),
       },
       data_status: {
         pnl_source: pnlSource,
@@ -446,25 +444,37 @@ export async function tradersRoutes(fastify: FastifyInstance): Promise<void> {
       return reply.status(404).send({ error: 'No position data available yet' });
     }
 
-    const positions = Array.from(state.positions.values()).map(p => ({
-      coin: p.coin,
-      size: p.size.toString(),
-      entry_price: p.entryPrice.toString(),
-      unrealized_pnl: p.unrealizedPnl.toString(),
-      leverage: p.leverage,
-      liquidation_price: p.liquidationPrice?.toString() ?? null,
-      margin_used: p.marginUsed.toString(),
-    }));
+    const liveUnrealized = calculateLiveUnrealizedPnl(state, getMarkPrice);
+    const hasLivePrices = liveUnrealized.perPosition.size > 0;
+
+    const positions = Array.from(state.positions.values()).map(p => {
+      const livePnl = liveUnrealized.perPosition.get(p.coin);
+      return {
+        coin: p.coin,
+        size: p.size.toString(),
+        entry_price: p.entryPrice.toString(),
+        unrealized_pnl: p.unrealizedPnl.toString(),
+        live_unrealized_pnl: livePnl?.toString() ?? null,
+        leverage: p.leverage,
+        liquidation_price: p.liquidationPrice?.toString() ?? null,
+        margin_used: p.marginUsed.toString(),
+        margin_type: p.marginType,
+      };
+    });
+
+    const polledTotal = state.positions.size > 0
+      ? Array.from(state.positions.values())
+          .reduce((sum, p) => sum.plus(p.unrealizedPnl), toDecimal('0'))
+      : toDecimal('0');
 
     return {
       address,
       positions,
       total_positions: positions.length,
-      total_unrealized_pnl: state.positions.size > 0
-        ? Array.from(state.positions.values())
-            .reduce((sum, p) => sum.plus(p.unrealizedPnl), toDecimal('0'))
-            .toString()
-        : '0',
+      total_unrealized_pnl: polledTotal.toString(),
+      live_total_unrealized_pnl: hasLivePrices ? liveUnrealized.total.toString() : null,
+      price_source: hasLivePrices ? 'allMids_websocket' : 'last_poll',
+      prices_available: getPriceCount(),
     };
   });
 

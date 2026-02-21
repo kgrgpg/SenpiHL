@@ -68,3 +68,9 @@ export interface PnLCalculationResult {
   tradingPnl: Decimal;
   fees: Decimal;
 }
+
+export interface SummaryStats {
+  peakPnl: number;
+  troughPnl: number;
+  maxDrawdown: number;
+}

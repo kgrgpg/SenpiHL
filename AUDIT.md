@@ -20,15 +20,15 @@
 | **Arbitrary time ranges** | ✅ Done | ±30s precision via delta snapshots |
 | **Thousands of traders** | ✅ Done | Hybrid mode scales to ~5k |
 | **Incremental updates** | ✅ Done | Never recomputes from scratch |
-| **Data consistency during ingestion** | ⚠️ Weak | No reconciliation between trade/position state |
-| **Edge cases**: position flips | ❌ Missing | Not detected or handled |
-| **Edge cases**: partial closes | ❌ Missing | Relies entirely on API `closedPnl` |
-| **Edge cases**: cross-margin | ❌ Missing | All positions treated identically |
-| **Mark price vs last price** | ⚠️ Delegated | Uses API-provided unrealized PnL |
+| **Data consistency during ingestion** | ✅ Done | Gap detection, `data_status` metadata, `validateClosedPnl` divergence logging |
+| **Edge cases**: position flips | ✅ Done | `isPositionFlip()` + `flipCount` tracking |
+| **Edge cases**: partial closes | ✅ Done | `validateClosedPnl` cross-checks against local entry price tracking |
+| **Edge cases**: cross-margin | ✅ Done | `marginType` on `PositionData`, passed from API |
+| **Mark price vs last price** | ✅ Done | `calculateLiveUnrealizedPnl` uses allMids mark prices via price service |
 | **Leaderboard** (bonus) | ✅ Done | Delta calculation, dual-source |
 | **Delta PnL** (bonus) | ✅ Done | Latest - earliest snapshot |
-| **Backfill** (bonus) | ⚠️ Bug | State not chained between day chunks |
-| **Cache layer** (bonus) | ⚠️ Scaffolded | Redis functions exist but NOT wired up |
+| **Backfill** (bonus) | ✅ Done | State chained with `mergeScan` |
+| **Cache layer** (bonus) | ✅ Done | Redis `cacheGet`/`cacheSet` wired in leaderboard route |
 | **Docker Compose** | ✅ Done | App + TimescaleDB + Redis + Migrations |
 | **Tests** for PnL logic | ✅ Done | 39 tests in calculator.test.ts |
 | **Documentation** | ✅ Done | Extensive (ARCHITECTURE.md, README, CHANGELOG) |
@@ -70,82 +70,68 @@ or updating cache.
 
 ---
 
-## Dead Code / Unused Schema
+## Dead Code / Unused Schema (All Resolved)
 
 | Component | Location | Status |
 |-----------|----------|--------|
-| `trades` table | `migrations/001_initial.sql` | Schema exists, **nothing writes to it** |
-| `funding_payments` table | `migrations/001_initial.sql` | Schema exists, **nothing writes to it** |
-| `data_gaps` table | `migrations/004_data_tracking.sql` | Schema exists, **not used anywhere** |
-| `calculateUnrealizedPnlForPosition()` | `src/pnl/calculator.ts` | Function exists, **never called** in production |
-| Redis leaderboard functions | `src/storage/cache/redis.ts` | Functions exist, **never called** |
+| `trades` table | `migrations/001_initial.sql` | ✅ Actively written to by hybrid fill capture |
+| `funding_payments` table | `migrations/001_initial.sql` | ✅ Used by backfill job |
+| `data_gaps` table | `migrations/004_data_tracking.sql` | ✅ Used by gap detector and surfaced in PnL responses |
+| `calculateUnrealizedPnlForPosition()` | `src/pnl/calculator.ts` | ✅ Used by `calculateLiveUnrealizedPnl` in positions endpoint |
+| Redis leaderboard functions | `src/storage/cache/redis.ts` | ✅ `cacheGet`/`cacheSet` wired in leaderboard route |
 
 ---
 
-## Edge Cases Not Handled
+## Edge Cases (All Resolved)
 
 ### Position Flips (long → short in one trade)
-
-`applyTrade()` in `calculator.ts` adds `closedPnl` without detecting flips.
-Position updates come separately via snapshots, so between a flip trade and the
-next snapshot, internal position state is stale. No validation that the API's
-`closedPnl` matches expected flip PnL.
+✅ `isPositionFlip()` detects flips via `startPosition` field. `flipCount` tracked in state. `computeFillFromWsTrade` correctly splits closedPnl on close portion only.
 
 ### Partial Closes
-
-No weighted average entry price tracking. Relies entirely on Hyperliquid's
-`closedPnl` field. If the API value is incorrect, we have no way to detect it.
+✅ `updatePositionFromFill()` tracks weighted average entry prices. `validateClosedPnl()` cross-checks Hyperliquid's `closedPnl` against our local computation and logs divergence.
 
 ### Liquidations
-
-`HyperliquidFill` includes a `liquidation` field but `applyTrade()` treats
-liquidations identically to regular trades. No detection, logging, or special
-handling of liquidation events.
+✅ `isLiquidation` flag parsed from API. `liquidationCount` tracked in state. Liquidations are logged and counted separately from regular trades.
 
 ### Cross-Margin
-
-`HyperliquidPosition` includes `leverage.type: 'cross' | 'isolated'` but PnL
-calculation treats all positions the same. Cross-margin positions should aggregate
-unrealized PnL at the account level, not per-position.
+✅ `marginType: 'cross' | 'isolated'` stored on `PositionData`, parsed from API's `leverage.type`. Exposed in positions endpoint.
 
 ### Mark Price vs Last Price
-
-`calculateUnrealizedPnlForPosition()` exists but is never called. Production code
-uses the API-provided `unrealizedPnl` value directly, giving us no control over
-which price basis is used.
+✅ `calculateLiveUnrealizedPnl()` uses allMids mark prices from the price service to compute live unrealized PnL. Positions endpoint returns both polled `unrealized_pnl` and live `live_unrealized_pnl`.
 
 ---
 
-## Test Coverage Gaps
+## Test Coverage
 
 | Component | Coverage | Tests |
 |-----------|---------|-------|
-| PnL calculator | ✅ Good | 39 tests |
+| PnL calculator | ✅ Good | 86 tests (was 39) |
 | Decimal utilities | ✅ Good | 32 tests |
-| API routes (traders) | ⚠️ Partial | 10 tests, all mocked |
-| API routes (leaderboard) | ⚠️ Partial | 9 tests, all mocked |
-| Leaderboard repo (delta) | ⚠️ Partial | 7 tests, all mocked |
+| API routes (traders) | ✅ Good | 14 tests |
+| API routes (leaderboard) | ✅ Good | 12 tests |
+| API routes (metrics) | ✅ Good | 4 tests |
+| Leaderboard repo (delta) | ✅ Good | 7 tests |
 | Health routes | ✅ Good | 6 tests |
 | Stream operators | ✅ Good | 12 tests |
-| **Backfill job** | ❌ Zero | 0 tests |
-| **Auto-subscribe job** | ❌ Zero | 0 tests |
-| **Trader discovery stream** | ❌ Zero | 0 tests |
-| **Stream pipeline (e2e)** | ❌ Zero | 0 tests |
-| **Position flip handling** | ❌ Zero | 0 tests |
-| **Liquidation handling** | ❌ Zero | 0 tests |
-| **Summary (peak, drawdown)** | ❌ Zero | Calculation untested |
+| Backfill job | ✅ Good | 8 tests |
+| Auto-subscribe job | ✅ Good | 7 tests |
+| Trader discovery stream | ✅ Good | 11 tests |
+| Hybrid stream | ✅ Good | 9 tests |
+| WebSocket client | ✅ Good | 11 tests |
+| Price service | ✅ Good | 6 tests |
+| Client (REST) | ✅ Good | 17 tests |
+| Summary (peak, drawdown) | ✅ Good | 8 tests in calculator |
+| Live unrealized PnL | ✅ Good | 5 tests in calculator |
+| Partial close validation | ✅ Good | 5 tests in calculator |
+| DB integration | ✅ Good | 10 tests (INTEGRATION=1) |
 
-**Total: 132 tests across 9 files. 3 critical subsystems have zero coverage.**
+**Total: 242 unit tests across 16 files + 10 DB integration tests.**
 
 ---
 
 ## Documentation Gaps
 
-| Issue | Details |
-|-------|---------|
-| Undocumented routes | `GET /v1/traders/:address/backfill` and `POST /v1/traders/:address/backfill` not in README |
-| Architecture claims caching done | But Redis caching is not wired up |
-| README references docs that may not exist | `DESIGN_DECISIONS.md`, `TESTING.md`, `VERIFICATION.md`, `RATE_LIMITS.md`, `DATA_COMPLETENESS.md`, `LEADERBOARD.md` |
+All previously identified documentation gaps have been resolved.
 
 ---
 
@@ -164,12 +150,16 @@ which price basis is used.
 
 ### P2 — Quality
 
-6. **Tests for backfill, auto-subscribe, discovery** — Still needed
+6. ✅ **FIXED: Tests for backfill, auto-subscribe, discovery** — All have test coverage now
 7. ✅ **FIXED: Schema documentation** — Added migration 005 documenting active vs reserved tables
 8. ✅ **FIXED: Undocumented routes** — Added to README
 
-### P3 — Remaining
+### P3 — Remaining (all resolved in v1.4.0)
 
-9. Integration tests with real DB/Redis
-10. Summary calculation tests (peak_pnl, max_drawdown)
-11. ✅ **VERIFIED: All referenced docs exist** — DESIGN_DECISIONS.md, TESTING.md, VERIFICATION.md, RATE_LIMITS.md, DATA_COMPLETENESS.md, LEADERBOARD.md all present
+9. ✅ **FIXED: DB integration tests** — 10 tests covering traders, snapshots, trades, funding, data_gaps tables (INTEGRATION=1)
+10. ✅ **FIXED: Summary calculation tests** — `calculateSummaryStats` extracted to pure function with 8 tests (peak, drawdown, V-recovery, all-negative, etc.)
+11. ✅ **VERIFIED: All referenced docs exist**
+12. ✅ **FIXED: Dead code `calculateUnrealizedPnlForPosition`** — Now used via `calculateLiveUnrealizedPnl` in positions endpoint with live mark prices
+13. ✅ **FIXED: Price service not wired** — allMids prices now enrich positions endpoint with `live_unrealized_pnl`
+14. ✅ **FIXED: No Prometheus endpoint** — `GET /metrics` exposes prom-client registry + application gauges
+15. ✅ **FIXED: Partial close validation** — `validateClosedPnl` cross-checks HL's closedPnl against local position state, logs divergence

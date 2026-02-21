@@ -6,6 +6,7 @@ import type {
   PnLStateData,
   PositionData,
   SnapshotData,
+  SummaryStats,
   TradeData,
 } from './types.js';
 
@@ -146,6 +147,36 @@ export function createSnapshot(
   };
 }
 
+/**
+ * Compute peak PnL, trough PnL, and max drawdown from a PnL history series.
+ * Max drawdown is measured as the largest peak-to-trough decline observed
+ * while walking through the series in chronological order.
+ */
+export function calculateSummaryStats(
+  pnlHistory: Array<[number, string]>,
+  currentPnl: number = 0
+): SummaryStats {
+  if (pnlHistory.length === 0) {
+    return { peakPnl: currentPnl, troughPnl: currentPnl, maxDrawdown: 0 };
+  }
+
+  let peakPnl = -Infinity;
+  let troughPnl = Infinity;
+  let runningPeak = -Infinity;
+  let maxDrawdown = 0;
+
+  for (const [, pnl] of pnlHistory) {
+    const v = parseFloat(pnl);
+    if (v > peakPnl) peakPnl = v;
+    if (v < troughPnl) troughPnl = v;
+    if (v > runningPeak) runningPeak = v;
+    const drawdown = runningPeak - v;
+    if (drawdown > maxDrawdown) maxDrawdown = drawdown;
+  }
+
+  return { peakPnl, troughPnl, maxDrawdown };
+}
+
 export function calculateUnrealizedPnlForPosition(
   size: Decimal,
   entryPrice: Decimal,
@@ -153,6 +184,57 @@ export function calculateUnrealizedPnlForPosition(
 ): Decimal {
   const direction = size.isPositive() ? new Decimal(1) : new Decimal(-1);
   return markPrice.minus(entryPrice).times(size.abs()).times(direction);
+}
+
+/**
+ * Compute live unrealized PnL for all positions using current mark prices.
+ * Positions without an available price are skipped.
+ */
+export function calculateLiveUnrealizedPnl(
+  state: PnLStateData,
+  getPrice: (coin: string) => Decimal | undefined
+): { total: Decimal; perPosition: Map<string, Decimal> } {
+  let total = new Decimal(0);
+  const perPosition = new Map<string, Decimal>();
+
+  for (const [coin, position] of state.positions) {
+    const markPrice = getPrice(coin);
+    if (!markPrice) continue;
+
+    const pnl = calculateUnrealizedPnlForPosition(position.size, position.entryPrice, markPrice);
+    perPosition.set(coin, pnl);
+    total = total.plus(pnl);
+  }
+
+  return { total, perPosition };
+}
+
+/**
+ * Cross-check a trade's reported closedPnl against what we'd expect from
+ * local position state. Returns null when validation isn't applicable
+ * (no position, opening trade, or non-closing direction).
+ */
+export function validateClosedPnl(
+  trade: TradeData,
+  position: PositionData | undefined
+): { expected: Decimal; reported: Decimal; divergence: Decimal } | null {
+  if (!position || position.size.isZero()) return null;
+  if (trade.closedPnl.isZero()) return null;
+
+  const positionIsLong = position.size.isPositive();
+  const tradeIsClosing =
+    (positionIsLong && trade.side === 'A') || (!positionIsLong && trade.side === 'B');
+  if (!tradeIsClosing) return null;
+
+  const closeSize = Decimal.min(trade.size, position.size.abs());
+  const direction = positionIsLong ? new Decimal(1) : new Decimal(-1);
+  const expected = trade.price.minus(position.entryPrice).times(closeSize).times(direction);
+
+  return {
+    expected,
+    reported: trade.closedPnl,
+    divergence: expected.minus(trade.closedPnl).abs(),
+  };
 }
 
 /**

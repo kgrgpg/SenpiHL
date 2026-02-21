@@ -100,12 +100,13 @@ docker compose run --rm migrations
 
 ## API Endpoints
 
-### Health
+### Health & Monitoring
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Basic health check |
 | `/ready` | GET | Readiness probe (checks DB + Redis) |
+| `/metrics` | GET | Prometheus metrics (prom-client format) |
 
 ### Status (v1) - NEW
 
@@ -332,7 +333,7 @@ npm run verify       # Verify PnL against Hyperliquid API
 | **Incremental Updates** | O(1) per fill | `applyTrade`, `applyFunding` -- no recomputation |
 | **Data Consistency** | Gap detector + data_status | Startup gap detection, per-response data source/coverage metadata, nullable fields for missing data |
 | **Snapshot Granularity** | Documented trade-off | ADR #6 in DESIGN.md, quantified query performance |
-| **Edge Cases** | Tested | Position flips, partial closes, cross-margin, liquidations -- 68 calculator tests |
+| **Edge Cases** | Tested | Position flips, partial closes, cross-margin, liquidations -- 86 calculator tests |
 | **Leaderboard** (bonus) | Portfolio-based | All timeframes use Hyperliquid portfolio API |
 | **Delta PnL** (bonus) | Yes | Snapshot-based delta + authoritative portfolio delta |
 | **Backfill** (bonus) | BullMQ + dynamic concurrency | Rate-budget-aware worker count adjustment |
@@ -341,10 +342,10 @@ npm run verify       # Verify PnL against Hyperliquid API
 ## Testing
 
 ```bash
-# Unit tests (220 tests across 15 files)
+# Unit tests (242 tests across 16 files)
 npm test
 
-# Integration tests (7 tests, live Hyperliquid API)
+# Integration tests (live Hyperliquid API + DB)
 INTEGRATION=1 npx vitest run src/__integration__/
 
 # Coverage

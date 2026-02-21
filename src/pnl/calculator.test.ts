@@ -9,6 +9,8 @@ import {
   calculatePnL,
   createSnapshot,
   calculateUnrealizedPnlForPosition,
+  calculateSummaryStats,
+  calculateLiveUnrealizedPnl,
   updatePositions,
   updatePosition,
   calculateTotalUnrealizedPnl,
@@ -18,6 +20,7 @@ import {
   isPositionFlip,
   computeFillFromWsTrade,
   updatePositionFromFill,
+  validateClosedPnl,
 } from './calculator.js';
 import type { TradeData, FundingData, PositionData } from './types.js';
 
@@ -1258,7 +1261,7 @@ describe('PnL Calculator', () => {
       expect(state.positions.get('BTC')!.entryPrice.toNumber()).toBe(59800);
     });
 
-    it('should handle funding payments in total PnL', () => {
+    it('should handle funding payments in total PnL (end-to-end)', () => {
       let state = createInitialState(1, '0xFunding');
 
       // Open long, receive funding, close
@@ -1290,8 +1293,298 @@ describe('PnL Calculator', () => {
       expect(state.realizedTradingPnl.toNumber()).toBe(1000);
       expect(state.realizedFundingPnl.toNumber()).toBe(-25);
       // total realized = trading + funding = 1000 - 25 = 975
-      const calc = calculatePnL(state, []);
+      const calc = calculatePnL(state);
       expect(calc.realizedPnl.toNumber()).toBe(975);
+    });
+  });
+
+  describe('calculateSummaryStats', () => {
+    it('should return currentPnl defaults for empty history', () => {
+      const stats = calculateSummaryStats([], 100);
+      expect(stats.peakPnl).toBe(100);
+      expect(stats.troughPnl).toBe(100);
+      expect(stats.maxDrawdown).toBe(0);
+    });
+
+    it('should return zero defaults when no history and no current', () => {
+      const stats = calculateSummaryStats([]);
+      expect(stats.peakPnl).toBe(0);
+      expect(stats.troughPnl).toBe(0);
+      expect(stats.maxDrawdown).toBe(0);
+    });
+
+    it('should find peak and trough for monotonically increasing series', () => {
+      const history: Array<[number, string]> = [
+        [1000, '10'],
+        [2000, '20'],
+        [3000, '30'],
+        [4000, '50'],
+      ];
+      const stats = calculateSummaryStats(history);
+      expect(stats.peakPnl).toBe(50);
+      expect(stats.troughPnl).toBe(10);
+      expect(stats.maxDrawdown).toBe(0);
+    });
+
+    it('should find peak and trough for monotonically decreasing series', () => {
+      const history: Array<[number, string]> = [
+        [1000, '100'],
+        [2000, '50'],
+        [3000, '20'],
+        [4000, '-10'],
+      ];
+      const stats = calculateSummaryStats(history);
+      expect(stats.peakPnl).toBe(100);
+      expect(stats.troughPnl).toBe(-10);
+      expect(stats.maxDrawdown).toBe(110);
+    });
+
+    it('should compute correct max drawdown for V-shaped recovery', () => {
+      const history: Array<[number, string]> = [
+        [1000, '100'],
+        [2000, '150'],
+        [3000, '50'],   // drawdown: 150 - 50 = 100
+        [4000, '200'],  // new peak
+      ];
+      const stats = calculateSummaryStats(history);
+      expect(stats.peakPnl).toBe(200);
+      expect(stats.troughPnl).toBe(50);
+      expect(stats.maxDrawdown).toBe(100);
+    });
+
+    it('should handle all-negative PnL history', () => {
+      const history: Array<[number, string]> = [
+        [1000, '-10'],
+        [2000, '-50'],
+        [3000, '-30'],
+        [4000, '-80'],
+      ];
+      const stats = calculateSummaryStats(history);
+      expect(stats.peakPnl).toBe(-10);
+      expect(stats.troughPnl).toBe(-80);
+      // max drawdown: peak at -10, trough at -80 = 70
+      expect(stats.maxDrawdown).toBe(70);
+    });
+
+    it('should handle single data point', () => {
+      const history: Array<[number, string]> = [[1000, '42']];
+      const stats = calculateSummaryStats(history);
+      expect(stats.peakPnl).toBe(42);
+      expect(stats.troughPnl).toBe(42);
+      expect(stats.maxDrawdown).toBe(0);
+    });
+
+    it('should handle multiple drawdowns and pick the largest', () => {
+      const history: Array<[number, string]> = [
+        [1000, '100'],
+        [2000, '80'],   // dd = 20
+        [3000, '120'],  // new peak
+        [4000, '60'],   // dd = 60 (largest)
+        [5000, '150'],  // new peak
+        [6000, '110'],  // dd = 40
+      ];
+      const stats = calculateSummaryStats(history);
+      expect(stats.peakPnl).toBe(150);
+      expect(stats.troughPnl).toBe(60);
+      expect(stats.maxDrawdown).toBe(60);
+    });
+  });
+
+  describe('calculateLiveUnrealizedPnl', () => {
+    it('should return zero for no positions', () => {
+      const state = createInitialState(1, '0x1234');
+      const result = calculateLiveUnrealizedPnl(state, () => undefined);
+      expect(result.total.toNumber()).toBe(0);
+      expect(result.perPosition.size).toBe(0);
+    });
+
+    it('should compute unrealized PnL using live prices', () => {
+      const state = createInitialState(1, '0x1234');
+      state.positions.set('BTC', {
+        coin: 'BTC',
+        size: toDecimal('2'),
+        entryPrice: toDecimal('50000'),
+        unrealizedPnl: toDecimal('0'),
+        leverage: 10,
+        liquidationPrice: null,
+        marginUsed: toDecimal('10000'),
+        marginType: 'cross',
+      });
+
+      const getPrice = (coin: string) => coin === 'BTC' ? toDecimal('55000') : undefined;
+      const result = calculateLiveUnrealizedPnl(state, getPrice);
+
+      // (55000 - 50000) * 2 = 10000
+      expect(result.total.toNumber()).toBe(10000);
+      expect(result.perPosition.get('BTC')?.toNumber()).toBe(10000);
+    });
+
+    it('should handle short positions correctly', () => {
+      const state = createInitialState(1, '0x1234');
+      state.positions.set('ETH', {
+        coin: 'ETH',
+        size: toDecimal('-5'),
+        entryPrice: toDecimal('3000'),
+        unrealizedPnl: toDecimal('0'),
+        leverage: 5,
+        liquidationPrice: null,
+        marginUsed: toDecimal('3000'),
+        marginType: 'cross',
+      });
+
+      const getPrice = (coin: string) => coin === 'ETH' ? toDecimal('2800') : undefined;
+      const result = calculateLiveUnrealizedPnl(state, getPrice);
+
+      // (2800 - 3000) * 5 * -1 = 1000
+      expect(result.total.toNumber()).toBe(1000);
+      expect(result.perPosition.get('ETH')?.toNumber()).toBe(1000);
+    });
+
+    it('should skip positions without available prices', () => {
+      const state = createInitialState(1, '0x1234');
+      state.positions.set('BTC', {
+        coin: 'BTC',
+        size: toDecimal('1'),
+        entryPrice: toDecimal('50000'),
+        unrealizedPnl: toDecimal('0'),
+        leverage: 10,
+        liquidationPrice: null,
+        marginUsed: toDecimal('5000'),
+        marginType: 'cross',
+      });
+      state.positions.set('DOGE', {
+        coin: 'DOGE',
+        size: toDecimal('10000'),
+        entryPrice: toDecimal('0.1'),
+        unrealizedPnl: toDecimal('0'),
+        leverage: 1,
+        liquidationPrice: null,
+        marginUsed: toDecimal('1000'),
+        marginType: 'cross',
+      });
+
+      // Only BTC price available
+      const getPrice = (coin: string) => coin === 'BTC' ? toDecimal('52000') : undefined;
+      const result = calculateLiveUnrealizedPnl(state, getPrice);
+
+      expect(result.perPosition.size).toBe(1);
+      expect(result.perPosition.has('BTC')).toBe(true);
+      expect(result.perPosition.has('DOGE')).toBe(false);
+      // (52000 - 50000) * 1 = 2000
+      expect(result.total.toNumber()).toBe(2000);
+    });
+
+    it('should sum across multiple positions', () => {
+      const state = createInitialState(1, '0x1234');
+      state.positions.set('BTC', {
+        coin: 'BTC',
+        size: toDecimal('1'),
+        entryPrice: toDecimal('50000'),
+        unrealizedPnl: toDecimal('0'),
+        leverage: 10,
+        liquidationPrice: null,
+        marginUsed: toDecimal('5000'),
+        marginType: 'cross',
+      });
+      state.positions.set('ETH', {
+        coin: 'ETH',
+        size: toDecimal('-10'),
+        entryPrice: toDecimal('3000'),
+        unrealizedPnl: toDecimal('0'),
+        leverage: 5,
+        liquidationPrice: null,
+        marginUsed: toDecimal('6000'),
+        marginType: 'cross',
+      });
+
+      const prices: Record<string, string> = { BTC: '51000', ETH: '2900' };
+      const getPrice = (coin: string) => prices[coin] ? toDecimal(prices[coin]!) : undefined;
+      const result = calculateLiveUnrealizedPnl(state, getPrice);
+
+      // BTC: (51000-50000)*1 = 1000, ETH: (2900-3000)*10*-1 = 1000
+      expect(result.total.toNumber()).toBe(2000);
+    });
+  });
+
+  describe('validateClosedPnl', () => {
+    it('should return null when no position exists', () => {
+      const trade: TradeData = {
+        coin: 'BTC', side: 'A', size: toDecimal('1'), price: toDecimal('50000'),
+        closedPnl: toDecimal('1000'), fee: toDecimal('5'), timestamp: new Date(), tid: 1,
+        isLiquidation: false,
+      };
+      expect(validateClosedPnl(trade, undefined)).toBeNull();
+    });
+
+    it('should return null for opening trades (zero closedPnl)', () => {
+      const trade: TradeData = {
+        coin: 'BTC', side: 'B', size: toDecimal('1'), price: toDecimal('50000'),
+        closedPnl: toDecimal('0'), fee: toDecimal('5'), timestamp: new Date(), tid: 1,
+        isLiquidation: false,
+      };
+      const position: PositionData = {
+        coin: 'BTC', size: toDecimal('0'), entryPrice: toDecimal('0'),
+        unrealizedPnl: toDecimal('0'), leverage: 1, liquidationPrice: null,
+        marginUsed: toDecimal('0'), marginType: 'cross',
+      };
+      expect(validateClosedPnl(trade, position)).toBeNull();
+    });
+
+    it('should validate matching closedPnl for a long close', () => {
+      const trade: TradeData = {
+        coin: 'BTC', side: 'A', size: toDecimal('1'), price: toDecimal('55000'),
+        closedPnl: toDecimal('5000'), fee: toDecimal('5'), timestamp: new Date(), tid: 1,
+        isLiquidation: false,
+      };
+      const position: PositionData = {
+        coin: 'BTC', size: toDecimal('2'), entryPrice: toDecimal('50000'),
+        unrealizedPnl: toDecimal('0'), leverage: 10, liquidationPrice: null,
+        marginUsed: toDecimal('10000'), marginType: 'cross',
+      };
+
+      const result = validateClosedPnl(trade, position);
+      expect(result).not.toBeNull();
+      expect(result!.expected.toNumber()).toBe(5000);
+      expect(result!.reported.toNumber()).toBe(5000);
+      expect(result!.divergence.toNumber()).toBe(0);
+    });
+
+    it('should detect divergence for incorrect closedPnl', () => {
+      const trade: TradeData = {
+        coin: 'BTC', side: 'A', size: toDecimal('1'), price: toDecimal('55000'),
+        closedPnl: toDecimal('4500'), fee: toDecimal('5'), timestamp: new Date(), tid: 1,
+        isLiquidation: false,
+      };
+      const position: PositionData = {
+        coin: 'BTC', size: toDecimal('2'), entryPrice: toDecimal('50000'),
+        unrealizedPnl: toDecimal('0'), leverage: 10, liquidationPrice: null,
+        marginUsed: toDecimal('10000'), marginType: 'cross',
+      };
+
+      const result = validateClosedPnl(trade, position);
+      expect(result).not.toBeNull();
+      expect(result!.expected.toNumber()).toBe(5000);
+      expect(result!.reported.toNumber()).toBe(4500);
+      expect(result!.divergence.toNumber()).toBe(500);
+    });
+
+    it('should validate short position close correctly', () => {
+      const trade: TradeData = {
+        coin: 'ETH', side: 'B', size: toDecimal('5'), price: toDecimal('2500'),
+        closedPnl: toDecimal('2500'), fee: toDecimal('5'), timestamp: new Date(), tid: 1,
+        isLiquidation: false,
+      };
+      const position: PositionData = {
+        coin: 'ETH', size: toDecimal('-5'), entryPrice: toDecimal('3000'),
+        unrealizedPnl: toDecimal('0'), leverage: 5, liquidationPrice: null,
+        marginUsed: toDecimal('3000'), marginType: 'cross',
+      };
+
+      const result = validateClosedPnl(trade, position);
+      expect(result).not.toBeNull();
+      // (2500 - 3000) * 5 * -1 = 2500
+      expect(result!.expected.toNumber()).toBe(2500);
+      expect(result!.divergence.toNumber()).toBe(0);
     });
   });
 });

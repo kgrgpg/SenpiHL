@@ -78,6 +78,11 @@ vi.mock('../../../utils/logger.js', () => ({
   },
 }));
 
+vi.mock('../../../state/price-service.js', () => ({
+  getMarkPrice: vi.fn().mockReturnValue(undefined),
+  getPriceCount: vi.fn().mockReturnValue(0),
+}));
+
 import { hyperliquidClient } from '../../../hyperliquid/client.js';
 import { initializeTraderState, getTraderState } from '../../../state/trader-state.js';
 import { tradersRepo, snapshotsRepo } from '../../../storage/db/repositories/index.js';

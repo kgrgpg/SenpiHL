@@ -4,6 +4,49 @@ All notable changes to the PnL Indexer project.
 
 ---
 
+## [1.4.0] - 2026-02-21
+
+### Quality Improvements, Live Prices, Metrics, and Full Audit Resolution
+
+#### Added: `calculateSummaryStats` pure function
+- Extracted peak/trough/max-drawdown logic from `traders.ts` into a testable pure function in `calculator.ts`
+- Max drawdown now correctly computed as the largest peak-to-trough decline (was previously just `trough - peak`)
+- 8 new tests covering: monotonic series, V-shaped recovery, all-negative PnL, multiple drawdowns, single/empty data
+
+#### Added: Live unrealized PnL via price service
+- `calculateLiveUnrealizedPnl()` uses allMids mark prices to compute fresh unrealized PnL between polls
+- `calculateUnrealizedPnlForPosition()` is no longer dead code -- used by the live calculation
+- Positions endpoint (`GET /v1/traders/:address/positions`) now returns:
+  - `live_unrealized_pnl` per position (from real-time mark prices)
+  - `live_total_unrealized_pnl` across all positions
+  - `margin_type` per position
+  - `price_source` and `prices_available` metadata
+
+#### Added: Partial close validation (`validateClosedPnl`)
+- Cross-checks Hyperliquid's reported `closedPnl` against locally computed value from position entry price
+- Logs a warning with divergence details (expected, reported, absolute and % difference)
+- Observability-only: does not change PnL behavior, safe for production
+- Wired into `processHybridFill` in the main pipeline
+
+#### Added: Prometheus `/metrics` endpoint
+- `GET /metrics` returns prom-client default + custom application gauges
+- Custom gauges: `pnl_tracked_traders`, `pnl_prices_cached`, `pnl_uptime_seconds`
+- Includes Node.js process metrics (CPU, memory, event loop) from `collectDefaultMetrics`
+- Stream operator metrics (`stream_events_total`, `stream_processing_duration_seconds`) exposed when streams are active
+
+#### Added: DB integration tests
+- `src/__integration__/db.test.ts` with 10 tests covering all tables: traders, pnl_snapshots, trades, funding_payments, data_gaps
+- Uses a dedicated test schema (`pnl_test_<pid>`) to avoid interfering with development data
+- Tests insert/query/upsert/time-range-query/aggregation patterns
+- Gated behind `INTEGRATION=1` (run with `INTEGRATION=1 npx vitest run src/__integration__/db.test.ts`)
+
+#### Changed
+- API version bumped to 1.4.0 in Swagger docs
+- AUDIT.md fully resolved: all 15 items now marked as fixed
+- Test count: 242 unit tests + 10 DB integration tests (was 220 unit + 7 API integration)
+
+---
+
 ## [1.3.0] - 2026-02-21
 
 ### PnL Accuracy, Data Integrity, and Gap Detection

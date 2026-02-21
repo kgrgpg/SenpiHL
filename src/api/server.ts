@@ -7,6 +7,7 @@ import { config } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
 
 import { healthRoutes } from './routes/health.js';
+import { metricsRoute } from './routes/metrics.js';
 import { tradersRoutes, leaderboardRoutes, backfillRoutes, statusRoutes, tradesRoutes } from './routes/v1/index.js';
 import { dashboardRoute } from './dashboard.js';
 
@@ -25,7 +26,7 @@ export async function createServer(): Promise<FastifyInstance> {
       info: {
         title: 'PnL Indexer API',
         description: 'PnL indexing service for Hyperliquid perpetual traders. Tracks realized/unrealized PnL, funding payments, and trading volume.',
-        version: '1.2.0',
+        version: '1.4.0',
       },
       tags: [
         { name: 'health', description: 'Health and readiness probes' },
@@ -67,6 +68,7 @@ export async function createServer(): Promise<FastifyInstance> {
   });
 
   await app.register(healthRoutes);
+  await app.register(metricsRoute);
   await app.register(dashboardRoute);
 
   await app.register(

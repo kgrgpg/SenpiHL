@@ -42,6 +42,7 @@ import {
   parseTradeFromApi,
   applyTrade,
   updatePositions,
+  validateClosedPnl,
 } from './pnl/calculator.js';
 import type { SnapshotData } from './pnl/types.js';
 import { toDecimal } from './utils/decimal.js';
@@ -102,6 +103,23 @@ function processHybridFill(address: string, fill: WebSocketFill): SnapshotData |
     fill.dir,
     fill.startPosition
   );
+
+  const position = state.positions.get(fill.coin);
+  const validation = validateClosedPnl(trade, position);
+  if (validation && !validation.divergence.isZero()) {
+    const pct = validation.expected.isZero()
+      ? 'N/A'
+      : validation.divergence.div(validation.expected.abs()).times(100).toFixed(2) + '%';
+    logger.warn({
+      address: address.slice(0, 10),
+      coin: fill.coin,
+      tid: trade.tid,
+      expected: validation.expected.toString(),
+      reported: validation.reported.toString(),
+      divergence: validation.divergence.toString(),
+      pct,
+    }, 'closedPnl divergence detected');
+  }
 
   state = applyTrade(state, trade);
   setTraderState(address, state);
