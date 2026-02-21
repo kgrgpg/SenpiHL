@@ -45,11 +45,10 @@ interface WsTrade {
   users: [string, string]; // [maker, taker]
 }
 
-// Top coins by volume for comprehensive trade capture
+// Top coins by volume for trade capture (kept to ~8 to stay within WS subscription budget)
 const DISCOVERY_COINS = [
-  'BTC', 'ETH', 'SOL', 'ARB', 'DOGE',
-  'WIF', 'SUI', 'PEPE', 'AVAX', 'MATIC',
-  'OP', 'APT', 'INJ', 'SEI', 'TIA',
+  'BTC', 'ETH', 'SOL', 'DOGE',
+  'SUI', 'PEPE', 'WIF', 'ARB',
 ];
 
 interface DiscoveredTrader {

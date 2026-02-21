@@ -78,7 +78,7 @@ describe('TraderDiscoveryStream', () => {
         knownTotal: 0,
         isRunning: false,
         fillsCaptured: 0,
-        subscribedCoins: 15,
+        subscribedCoins: 8,
       });
     });
   });

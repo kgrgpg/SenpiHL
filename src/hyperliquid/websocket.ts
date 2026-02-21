@@ -332,10 +332,18 @@ export class HyperliquidWebSocket {
   }
 
   private resubscribeAll(): void {
-    for (const subscription of this.subscriptions.values()) {
-      this.sendSubscription(subscription, 'subscribe');
-    }
-    logger.info({ count: this.subscriptions.size }, 'Resubscribed to all channels');
+    const subs = Array.from(this.subscriptions.values());
+    let i = 0;
+    const sendNext = (): void => {
+      if (i >= subs.length || this.ws?.readyState !== WebSocket.OPEN) {
+        logger.info({ count: i }, 'Resubscribed to all channels');
+        return;
+      }
+      this.sendSubscription(subs[i]!, 'subscribe');
+      i++;
+      setTimeout(sendNext, 100);
+    };
+    sendNext();
   }
 
   private setupAutoReconnect(): void {
