@@ -4,6 +4,28 @@ All notable changes to the PnL Indexer project.
 
 ---
 
+## [1.2.1] - 2026-02-21
+
+### Bug Fix: Buyer/Seller Mapping + Comprehensive Test Coverage
+
+#### Fixed
+- **Critical: WsTrade buyer/seller mapping** — `users` field is `[buyer, seller]` per Hyperliquid docs, not `[maker, taker]`. Buyer always gets side `'B'`, seller always gets `'A'`. The previous derivation from `trade.side` inverted sides when the taker was the buyer.
+
+#### Added: Test Coverage (220 unit + 7 integration = 227 total)
+- **Extended PnL tests**: 12-trade scalping sequence with cumulative verification ($260 net), funding impact on total PnL (trading PnL + funding = correct realized)
+- **WebSocket tests** (11): subscription tracking, user count limits, allMids/pong filtering, coin isolation, connection lifecycle
+- **Hybrid stream tests** (9): 10-user WS limit enforcement, polling-only fallback, fill/snapshot emission, cleanup
+- **Price service tests** (6): allMids cache updates, stop/clear, unknown coin handling
+- **Integration tests** (7, CI-skippable): live Hyperliquid API shape validation (`clearinghouseState`, `userFillsByTime`, `userFunding` delta wrapper, `portfolio`), PnL cross-check (sum closedPnl from fills), 10k fill cap documentation
+  - Run with: `INTEGRATION=1 npx vitest run src/__integration__/`
+  - Excluded from `npx vitest run` by default
+
+#### Changed
+- Price service documented as future-use for real-time unrealized PnL estimation; stats exposed in `/v1/status`
+- `vitest.config.ts` excludes `src/__integration__/` unless `INTEGRATION=1` env var is set
+
+---
+
 ## [1.2.0] - 2026-02-21
 
 ### All-Trader Real-Time Trade Capture

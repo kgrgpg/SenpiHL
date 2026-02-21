@@ -373,7 +373,7 @@ Subscribe to **coin-level `trades`** WebSocket channels for top 15 coins by volu
 
 | Component | Role |
 |-----------|------|
-| `trades` WS (15 coins) | Capture fills for all tracked traders (zero weight) |
+| `trades` WS (8 coins) | Capture fills for all tracked traders (zero weight) |
 | `allMids` WS | Real-time mark prices for unrealized PnL (zero weight) |
 | `userFills` WS (10 users) | Authoritative fills with closedPnl + fees for top 10 |
 | `clearinghouseState` polling | Reconciliation every 5 min (corrects position drift) |
@@ -385,14 +385,15 @@ Subscribe to **coin-level `trades`** WebSocket channels for top 15 coins by volu
 | Trader limit | Unlimited | 10 |
 | `closedPnl` | Computed locally from position state | Provided by Hyperliquid |
 | `fee` | Estimated (0, corrected at reconciliation) | Exact |
-| Coin coverage | Subscribed coins only (top 15) | All coins |
+| Coin coverage | Subscribed coins only (top 8) | All coins |
 | Weight cost | Zero (WebSocket) | Zero (WebSocket) |
 
 ### Rationale
 
 - The 10-user `userFills` limit was the primary bottleneck for real-time data
 - Coin-level trades are coin subscriptions (limit: 1000), not user subscriptions
-- Top 15 coins cover >90% of trading volume
+- Top 8 coins cover majority of trading volume (kept conservative for WS stability)
+- WsTrade `users` field is `[buyer, seller]` — buyer always side `'B'`, seller always `'A'`
 - Local `closedPnl` computation is correct for the common case (close position at execution price)
 - 5-minute reconciliation via `clearinghouseState` corrects any cumulative drift
 
