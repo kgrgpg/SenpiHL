@@ -5,11 +5,14 @@ This guide explains how to verify our PnL calculations against Hyperliquid's act
 ## Quick Start
 
 ```bash
-# Run verification against any trader address
+# Verify a single trader against Hyperliquid API (on-demand)
 npx tsx scripts/verify.ts 0xYOUR_TRADER_ADDRESS
 
 # With custom lookback period (default: 30 days)
 npx tsx scripts/verify.ts 0xYOUR_TRADER_ADDRESS 7
+
+# Verify ALL active traders' 24h PnL against Hyperliquid portfolio
+DATABASE_URL=postgresql://postgres:password@localhost:5432/pnl_indexer npx tsx scripts/verify-1d.ts
 ```
 
 ## Finding Test Addresses
@@ -240,6 +243,28 @@ curl -X POST https://api.hyperliquid.xyz/info \
 1. Run verification script first to get baseline
 2. Check our API is using the same time window
 3. Compare individual components (realized, funding, unrealized)
+
+## Automated 24-Hour Verification (`scripts/verify-1d.ts`)
+
+After the system has been running for at least 24 hours, you can verify PnL accuracy across all tracked traders at once:
+
+```bash
+DATABASE_URL=postgresql://postgres:password@localhost:5432/pnl_indexer npx tsx scripts/verify-1d.ts
+```
+
+This script:
+1. Queries all active traders from the database
+2. For each trader, computes the PnL delta from our DB snapshots over the last 24 hours
+3. Fetches Hyperliquid's official `perpDay` PnL from their portfolio API
+4. Compares the two and reports matches (< 5% difference) and mismatches
+5. Outputs a summary table with coverage, delta, and difference percentages
+
+Example output:
+```
+Address            | Our Delta   | HL 1d PnL   | Diff %  | Status
+0x1234...abcd      | $1,250.30   | $1,245.80   | 0.36%   | MATCH
+0x5678...ef01      | $-340.20    | $-348.50    | 2.38%   | MATCH
+```
 
 ## Next Steps
 

@@ -4,6 +4,50 @@ All notable changes to the PnL Indexer project.
 
 ---
 
+## [1.5.0] - 2026-02-22
+
+### Production Stability, Fill Deduplication, and 24h Verification
+
+Addresses all operational issues discovered during live deployment with 1,016 traders.
+
+#### Fixed: WebSocket reconnection death spiral
+- Increased resubscription stagger from 100ms to 1,500ms between channels
+- Added 2s post-connect delay before resubscription to let the connection stabilize
+- Lowered stable-connection threshold to 20s so the reconnect counter resets properly (WS stays up ~26s per cycle)
+- Increased max reconnect attempts to 100; after exhaustion, resets counter and retries in 5 min instead of giving up
+- Base reconnect delay increased from 1s to 2s; exponential backoff capped at attempt 5
+
+#### Fixed: Snapshot batch INSERT duplicate key error
+- Added `deduplicateSnapshots()` in the main pipeline that keeps the latest entry per `(traderId, timestamp)` before batch insert
+- PostgreSQL's `INSERT ... ON CONFLICT DO UPDATE` no longer fails when `bufferTime` collects multiple events for the same key
+
+#### Fixed: Fill double-counting on WebSocket reconnect
+- Added tid-based deduplication via `markTidProcessed()` in trader state module
+- When Hyperliquid replays recent fills on resubscription, duplicates are silently skipped
+- Prevents inflation of realized PnL, fees, volume, and trade count
+- Per-trader tid set capped at 5,000 entries with LRU eviction
+
+#### Fixed: DecimalError on undefined API fields
+- `parseTradeFromApi` and `parseFundingFromApi` now use `?? '0'` fallback for all numeric string fields
+- Prevents crashes when Hyperliquid returns null/undefined for `closedPnl`, `fee`, `fundingRate`, etc.
+
+#### Fixed: Startup 429 rate limiting
+- Removed immediate `fetchSnapshot$` from `subscribeTrader()` — initial snapshots now flow through the polling loop
+- First polling cycle fires 10s after startup (was waiting for full `SNAPSHOT_INTERVAL_MS`)
+- Polling uses staggered batches of 10 with 3s delays, keeping well within rate limits for 1,000+ traders
+
+#### Changed
+- `closedPnl` divergence warnings downgraded from `warn` to `debug` level (only logged when abs divergence > $0.01)
+- Docker healthcheck: start period 30s, 5 retries (was 5s, 3 retries)
+- Hybrid stream test updated for deferred initial snapshot behavior
+
+#### Added: 1-Day PnL Verification Script
+- `scripts/verify-1d.ts` — compares PnL deltas stored in our DB over 24h with Hyperliquid's `perpDay` portfolio data for all tracked traders
+- Reports match/mismatch with configurable threshold (default 5%)
+- Usage: `DATABASE_URL=... npx tsx scripts/verify-1d.ts [--threshold 5]`
+
+---
+
 ## [1.4.0] - 2026-02-21
 
 ### Quality Improvements, Live Prices, Metrics, and Full Audit Resolution
@@ -454,7 +498,7 @@ This commit represents the complete implementation of the PnL Indexer for Hyperl
 |----------|---------|
 | `README.md` | Project overview, quick start, API reference |
 | `ARCHITECTURE.md` | System design, components, data flow |
-| `DESIGN_DECISIONS.md` | ADRs explaining technical choices |
+| `DESIGN.md` | ADRs explaining technical choices (11 decisions) |
 | `TESTING.md` | Testing strategy and coverage |
 | `VERIFICATION.md` | How to verify PnL accuracy |
 | `RATE_LIMITS.md` | API rate limit analysis and mitigation |

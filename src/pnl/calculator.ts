@@ -380,10 +380,10 @@ export function parseTradeFromApi(
   return {
     coin,
     side,
-    size: toDecimal(sz),
-    price: toDecimal(px),
-    closedPnl: toDecimal(closedPnl),
-    fee: toDecimal(fee),
+    size: toDecimal(sz ?? '0'),
+    price: toDecimal(px ?? '0'),
+    closedPnl: toDecimal(closedPnl ?? '0'),
+    fee: toDecimal(fee ?? '0'),
     timestamp: new Date(time),
     tid,
     isLiquidation,
@@ -401,9 +401,9 @@ export function parseFundingFromApi(
 ): FundingData {
   return {
     coin,
-    fundingRate: toDecimal(fundingRate),
-    payment: toDecimal(usdc),
-    positionSize: toDecimal(szi),
+    fundingRate: toDecimal(fundingRate ?? '0'),
+    payment: toDecimal(usdc ?? '0'),
+    positionSize: toDecimal(szi ?? '0'),
     timestamp: new Date(time),
   };
 }

@@ -124,16 +124,12 @@ export class HybridDataStream {
         .subscribe();
     }
 
-    // Add to tracked traders with subscription reference
     this.traders.set(address, {
       address,
       subscribedAt: Date.now(),
       lastSnapshot: 0,
       fillSubscription,
     });
-
-    // Fetch initial snapshot
-    this.fetchSnapshot$(address).subscribe();
 
     logger.info({ address, totalTraders: this.traders.size }, 'Trader subscribed to hybrid stream');
   }
@@ -223,7 +219,8 @@ export class HybridDataStream {
    * Staggers requests to avoid rate limit spikes
    */
   private setupPollingLoop(): void {
-    this.pollingSubscription = timer(SNAPSHOT_INTERVAL_MS, SNAPSHOT_INTERVAL_MS)
+    // First poll after 10s (let traders register), then every SNAPSHOT_INTERVAL_MS
+    this.pollingSubscription = timer(10_000, SNAPSHOT_INTERVAL_MS)
       .pipe(
         tap(() => logger.debug({ count: this.traders.size }, 'Starting snapshot poll cycle')),
         switchMap(() => {

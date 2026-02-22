@@ -71,6 +71,7 @@ import {
   getTraderState,
   setTraderState,
   initializeTraderState,
+  markTidProcessed,
 } from './state/trader-state.js';
 
 // Legacy polling imports (fallback mode)
@@ -90,6 +91,10 @@ function processHybridFill(address: string, fill: WebSocketFill): SnapshotData |
     return null;
   }
 
+  if (!markTidProcessed(address, fill.tid)) {
+    return null;
+  }
+
   const trade = parseTradeFromApi(
     fill.coin,
     fill.side,
@@ -106,11 +111,11 @@ function processHybridFill(address: string, fill: WebSocketFill): SnapshotData |
 
   const position = state.positions.get(fill.coin);
   const validation = validateClosedPnl(trade, position);
-  if (validation && !validation.divergence.isZero()) {
+  if (validation && validation.divergence.abs().gt(0.01)) {
     const pct = validation.expected.isZero()
       ? 'N/A'
       : validation.divergence.div(validation.expected.abs()).times(100).toFixed(2) + '%';
-    logger.warn({
+    logger.debug({
       address: address.slice(0, 10),
       coin: fill.coin,
       tid: trade.tid,
@@ -181,12 +186,28 @@ function processHybridSnapshot(
 }
 
 /**
+ * Deduplicate snapshots by (traderId, timestamp), keeping the latest entry.
+ * PostgreSQL rejects INSERT ... ON CONFLICT DO UPDATE when the same conflict
+ * target appears more than once in a single statement.
+ */
+function deduplicateSnapshots(snapshots: SnapshotData[]): SnapshotData[] {
+  const map = new Map<string, SnapshotData>();
+  for (const s of snapshots) {
+    const key = `${s.traderId}:${s.timestamp.getTime()}`;
+    map.set(key, s);
+  }
+  return Array.from(map.values());
+}
+
+/**
  * Save snapshots to database (returns Observable)
  */
 function saveSnapshots$(snapshots: SnapshotData[]) {
   if (snapshots.length === 0) return of(void 0);
 
-  const inserts = snapshots.map((s) => ({
+  const deduped = deduplicateSnapshots(snapshots);
+
+  const inserts = deduped.map((s) => ({
     traderId: s.traderId,
     timestamp: s.timestamp,
     realizedPnl: s.realizedPnl,
@@ -198,6 +219,13 @@ function saveSnapshots$(snapshots: SnapshotData[]) {
     totalVolume: s.totalVolume,
     accountValue: s.accountValue,
   }));
+
+  if (deduped.length !== snapshots.length) {
+    logger.debug(
+      { before: snapshots.length, after: deduped.length },
+      'Deduplicated snapshots before insert'
+    );
+  }
 
   return from(snapshotsRepo.insertMany(inserts));
 }

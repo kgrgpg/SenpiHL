@@ -805,43 +805,9 @@ Array<{
 **What we get:** Authoritative all-time totals from Hyperliquid.
 **Limitation:** No breakdown by time period, just cumulative.
 
-### Current Implementation (Snapshots Only)
+### Current Implementation: Snapshots + Trades (Hybrid)
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    CURRENT DATA FLOW                                 │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  WebSocket Fills ─┬─► Calculate PnL ─► pnl_snapshots (every 30s)    │
-│                   │   (in-memory)                                    │
-│  REST Positions ──┘                                                  │
-│                                                                      │
-│  Backfill Job ────► Reconstruct snapshots from fills + funding      │
-│                     (fills NOT stored, only used for calculation)   │
-│                                                                      │
-│  ┌─────────────────────────────────────────────────────────────┐    │
-│  │ pnl_snapshots                                                │    │
-│  │ ─────────────────────────────────────────────────────────── │    │
-│  │ trader_id | timestamp | total_pnl | realized_pnl | volume   │    │
-│  │ 1         | 10:00:00  | 5000      | 4500         | 100000   │    │
-│  │ 1         | 10:00:30  | 5100      | 4500         | 100000   │    │
-│  │ 1         | 10:01:00  | 4900      | 4600         | 102000   │    │
-│  └─────────────────────────────────────────────────────────────┘    │
-│                                                                      │
-│  Interval PnL = snapshot[end].total_pnl - snapshot[start].total_pnl │
-│                                                                      │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-**Limitations of Current Approach:**
-
-1. **Boundary Precision:** ±30 seconds on interval boundaries
-2. **No Per-Trade Analytics:** Cannot answer "what was their best trade?"
-3. **No Per-Asset Breakdown:** Cannot separate BTC PnL from ETH PnL
-4. **Gap Sensitivity:** Missing snapshots = incorrect delta calculations
-5. **No Trade Metadata:** Cannot calculate win rate, avg size, frequency
-
-### Recommended: Snapshots + Trades (Hybrid)
+As of v1.2.0, we store **both** individual fills and periodic PnL snapshots:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -899,11 +865,11 @@ Choose your approach based on requirements:
 | Minimum storage footprint | Snapshots Only (5min interval) |
 | Maximum query flexibility | Trades Only (expensive queries) |
 
-### Design Decision: Why Snapshots Only
+### Design Decision: Why Snapshots + Trades
 
-**Our Choice:** Snapshots Only (current implementation)
+**Our Choice:** Snapshots + Trades (hybrid storage)
 
-**Rationale:** The original requirements (see REQUIREMENTS.md) are entirely PnL-focused. Snapshots cover 100% of the required functionality:
+**Rationale:** The original requirements (see REQUIREMENTS.md) are PnL-focused. Snapshots cover 100% of the required functionality, while storing individual trades gives us per-asset breakdown and an audit trail:
 
 | Original Requirement | Covered by Snapshots? | How |
 |---------------------|----------------------|-----|
@@ -930,10 +896,7 @@ Choose your approach based on requirements:
 
 **Trade-off Accepted:**
 - Interval boundaries have ±30 second precision (configurable)
-- Cannot retroactively add per-trade analytics without re-backfilling
-
-**Future Expansion:**
-If requirements expand to need per-trade analytics, add a `trades` table alongside snapshots (hybrid approach). The API already provides trade-level data; we simply don't persist it currently.
+- Slightly more storage than snapshots-only, but enables per-trade audit and analytics
 
 ---
 
@@ -1434,6 +1397,8 @@ All endpoints will be prefixed with `/v1/` to support future API evolution:
 ---
 
 ## Project Structure
+
+> **Note:** The structure below was the original design blueprint. For the current, accurate project structure, see [README.md](./README.md#project-structure).
 
 ```
 src/
@@ -2145,11 +2110,19 @@ jobs:
 | Status API | System monitoring endpoints | ✅ Done |
 | Data Completeness | Track gaps and coverage | ✅ Done |
 
-### Phase 4: Time Permitting (Future)
+### Phase 4: Quality & Monitoring ✅ COMPLETE
 
 | Task | Description | Status |
 |------|-------------|--------|
-| Swagger docs | OpenAPI specification | Pending |
+| Swagger docs | OpenAPI specification via `@fastify/swagger` | ✅ Done |
+| Prometheus metrics | `/metrics` endpoint with prom-client | ✅ Done |
+| Production stability | WS reconnect, fill dedup, rate limit tuning | ✅ Done (v1.5.0) |
+| PnL verification | 24h automated comparison with Hyperliquid | ✅ Done |
+
+### Phase 5: Future Enhancements
+
+| Task | Description | Status |
+|------|-------------|--------|
 | Authentication | API key middleware | Pending |
 | Rate limiting | Per-client limits | Pending |
 | Analytics | Sharpe, Sortino, drawdown | Pending |

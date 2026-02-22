@@ -103,6 +103,19 @@ Full rate limit analysis: [RATE_LIMIT_ANALYSIS.md](./RATE_LIMIT_ANALYSIS.md)
 
 ---
 
-## 7. Full Documentation
+## 7. Data Integrity
+
+| Feature | Implementation |
+|---------|---------------|
+| **Gap detection** | On startup, detects snapshot gaps and records in `data_gaps` table |
+| **Fill deduplication** | tid-based tracking prevents double-counting on WS reconnect |
+| **Snapshot dedup** | Client-side dedup before batch INSERT prevents constraint violations |
+| **`data_status`** | Every PnL response includes source, coverage, and known gaps |
+| **`closedPnl` validation** | Cross-checks Hyperliquid's closedPnl against local computation |
+| **Prometheus metrics** | `/metrics` endpoint with tracked traders, prices cached, uptime |
+
+---
+
+## 8. Full Documentation
 
 For the complete architecture including data flow diagrams, storage trade-off analysis, caching strategy, and query performance benchmarks, see [ARCHITECTURE.md](./ARCHITECTURE.md).

@@ -135,21 +135,13 @@ describe('HybridDataStream', () => {
 
       await new Promise((r) => setTimeout(r, 50));
 
-      expect(events.length).toBe(2); // 1 snapshot + 1 fill
-      expect(events[1]).toMatchObject({ type: 'fill', address: '0xTrader1' });
+      expect(events.length).toBe(1); // fill only (initial snapshot deferred to polling loop)
+      expect(events[0]).toMatchObject({ type: 'fill', address: '0xTrader1' });
     });
 
-    it('should emit snapshot events from polling', async () => {
-      const events: unknown[] = [];
-      stream.stream$.subscribe((e) => events.push(e));
-
+    it('should register trader for polling', () => {
       stream.subscribeTrader('0xTrader1');
-
-      // Initial subscribe triggers a fetchSnapshot
-      await new Promise((r) => setTimeout(r, 50));
-
-      expect(events.length).toBeGreaterThanOrEqual(1);
-      expect(events[0]).toMatchObject({ type: 'snapshot', address: '0xTrader1' });
+      expect(stream.traderCount).toBe(1);
     });
   });
 

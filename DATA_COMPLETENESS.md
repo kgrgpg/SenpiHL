@@ -28,17 +28,20 @@ The `recentTrades` endpoint includes **both buyer and seller addresses** for eve
 │                    AUTO-DISCOVERY PIPELINE                              │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
-│  1. Poll recentTrades    2. Extract addresses    3. Queue & Subscribe   │
+│  1. WebSocket trades     2. Extract addresses    3. Queue & Subscribe   │
 │  ─────────────────────   ────────────────────    ─────────────────────  │
 │                                                                         │
-│  POST /info              Each trade has:         Check against DB       │
-│  { type: recentTrades,   { users: [buyer,       If new → add to queue   │
-│    coin: "ETH" }           seller] }            Auto-subscribe job      │
+│  Subscribe to coin-level Each trade has:         Check against DB       │
+│  `trades` WS channels    { users: [buyer,       If new → add to queue   │
+│  (BTC, ETH, SOL, ...)     seller] }            Auto-subscribe job      │
 │                                                                         │
-│  Poll 8 coins ────────▶  ~50-100 addresses ────▶ thousands per day!     │
+│  8 coin channels ──────▶  continuous stream ────▶ thousands per day!     │
+│  (zero weight cost)                                                     │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Note**: Discovery uses WebSocket `trades` subscriptions (zero API weight), not REST `recentTrades` polling. This is far more efficient and provides real-time discovery.
 
 ### Discovery Rate
 
@@ -169,53 +172,31 @@ traders
 
 ## API Endpoints for Data Management
 
-### Check Data Completeness
+### System Status
 
 ```bash
-GET /v1/admin/data-status
+GET /v1/status
 
-Response:
-{
-  "total_traders": 150,
-  "traders_with_complete_data": 120,
-  "traders_needing_backfill": 30,
-  "total_snapshots": 1500000,
-  "oldest_data": "2025-01-01T00:00:00Z",
-  "data_coverage": {
-    "1d": "99%",
-    "7d": "95%", 
-    "30d": "80%"
-  }
-}
+# Returns: mode, connections, discovery stats, data integrity info
 ```
 
-### Get Trader Data Status
+### Trader Data Status (via PnL endpoint)
 
 ```bash
-GET /v1/traders/{address}/data-status
+GET /v1/traders/{address}/pnl?timeframe=1d
 
-Response:
-{
-  "address": "0x...",
-  "tracking_since": "2025-02-01T00:00:00Z",
-  "data_start_date": "2025-01-01T00:00:00Z",
-  "backfill_status": "complete",
-  "data_freshness": "current",
-  "total_fills": 5000,
-  "total_snapshots": 2880,
-  "unresolved_gaps": 0
-}
+# Response includes data_status:
+# - pnl_source, tracking_since, tracking_covers_timeframe
+# - fills_in_range, snapshots_in_range
+# - known_gaps (from gap detector)
 ```
 
-### Queue Trader for Discovery
+### Subscribe a Trader
 
 ```bash
-POST /v1/admin/discovery-queue
-{
-  "addresses": ["0x...", "0x..."],
-  "source": "leaderboard",
-  "priority": 1
-}
+POST /v1/traders/{address}/subscribe
+
+# Manually add a trader to tracking; auto-discovery handles the rest
 ```
 
 ---

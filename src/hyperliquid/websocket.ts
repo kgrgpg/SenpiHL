@@ -77,10 +77,11 @@ export class HyperliquidWebSocket {
   private readonly destroy$ = new Subject<void>();
   private readonly subscriptions = new Map<string, Subscription>();
   private reconnectAttempts = 0;
-  private readonly maxReconnectAttempts = 50;
-  private readonly baseReconnectDelay = 1000;
+  private readonly maxReconnectAttempts = 100;
+  private readonly baseReconnectDelay = 2000;
   private lastConnectedAt = 0;
-  private static readonly MIN_STABLE_MS = 30_000; // 30s before considering connection stable
+  private static readonly MIN_STABLE_MS = 20_000; // 20s before considering connection stable
+  private static readonly RESUB_STAGGER_MS = 1500; // delay between each resubscription message
 
   constructor() {
     this.setupAutoReconnect();
@@ -127,8 +128,9 @@ export class HyperliquidWebSocket {
         logger.info('WebSocket connected');
         this.connectionState.next('connected');
         this.lastConnectedAt = Date.now();
-        this.resubscribeAll();
         this.startHeartbeat();
+        // Delay resubscription by 2s to let the connection stabilize
+        setTimeout(() => this.resubscribeAll(), 2000);
       });
 
       this.ws.on('message', (data: Buffer) => {
@@ -342,17 +344,23 @@ export class HyperliquidWebSocket {
 
   private resubscribeAll(): void {
     const subs = Array.from(this.subscriptions.values());
+    if (subs.length === 0) return;
+
     let i = 0;
     const sendNext = (): void => {
       if (i >= subs.length || this.ws?.readyState !== WebSocket.OPEN) {
-        logger.info({ count: i }, 'Resubscribed to all channels');
+        logger.info({ count: i, total: subs.length }, 'Resubscribed to all channels');
         return;
       }
       this.sendSubscription(subs[i]!, 'subscribe');
       i++;
-      setTimeout(sendNext, 100);
+      setTimeout(sendNext, HyperliquidWebSocket.RESUB_STAGGER_MS);
     };
     sendNext();
+  }
+
+  resetReconnectAttempts(): void {
+    this.reconnectAttempts = 0;
   }
 
   private setupAutoReconnect(): void {
@@ -361,24 +369,28 @@ export class HyperliquidWebSocket {
         filter((state) => state === 'disconnected'),
         switchMap(() => {
           if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            logger.error('Max reconnection attempts reached');
-            return EMPTY;
+            logger.error('Max reconnection attempts reached, resetting counter and retrying in 5 min');
+            this.reconnectAttempts = 0;
+            return timer(300_000).pipe(
+              tap(() => this.connect()),
+              catchError(() => EMPTY)
+            );
           }
 
           this.reconnectAttempts++;
-          const delay = Math.min(
-            this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts - 1),
+          const reconnectDelay = Math.min(
+            this.baseReconnectDelay * Math.pow(2, Math.min(this.reconnectAttempts - 1, 5)),
             60_000 // cap at 60s
           );
 
           logger.info(
-            { attempt: this.reconnectAttempts, delay, maxAttempts: this.maxReconnectAttempts },
+            { attempt: this.reconnectAttempts, delay: reconnectDelay, maxAttempts: this.maxReconnectAttempts },
             'Scheduling reconnection'
           );
 
           this.connectionState.next('reconnecting');
 
-          return timer(delay).pipe(
+          return timer(reconnectDelay).pipe(
             tap(() => this.connect()),
             catchError((err) => {
               logger.error({ error: (err as Error).message }, 'Reconnection failed');

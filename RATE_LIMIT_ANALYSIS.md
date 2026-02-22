@@ -139,4 +139,5 @@ When a user queries a specific trader, the API calls (portfolio + fills + fundin
 | Discovery via WS trades | Implemented (`trader-discovery.stream.ts`) |
 | Staggered polling | Implemented (3s batch delay) |
 | Backfill throttle | Implemented (wait on budget) |
-| 429 errors | Zero after initial startup burst |
+| Deferred initial snapshots | Implemented (v1.5.0, no burst on startup) |
+| 429 errors | Zero (startup burst fixed in v1.5.0) |

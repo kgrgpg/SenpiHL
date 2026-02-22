@@ -4,10 +4,10 @@ This document explains how the PnL leaderboard works, its limitations, and how w
 
 > **Status: FULLY INTEGRATED** ✅
 > 
-> The dual-source leaderboard is fully integrated into the main app.
-> - `GET /v1/leaderboard?timeframe=1d|7d|30d` - Uses our calculated data
-> - `GET /v1/leaderboard?timeframe=all` - Uses Hyperliquid's portfolio API
+> The portfolio-based leaderboard is fully integrated into the main app.
+> - `GET /v1/leaderboard?timeframe=1d|7d|30d|all` - Uses Hyperliquid's portfolio API (perpDay/perpWeek/perpMonth/perpAllTime)
 > - `GET /v1/leaderboard/info` - API documentation
+> - Each entry includes `data_source` badge and `timeframe_coverage`
 
 ---
 

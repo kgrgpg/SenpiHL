@@ -11,133 +11,82 @@ This document outlines the testing strategy for the PnL Indexer, covering unit t
 3. **Mock External Dependencies**: API calls, database, and Redis are mocked in unit tests
 4. **Use Marble Testing for Streams**: RxJS provides excellent testing utilities for async streams
 
+## Test Summary
+
+**242 unit tests across 16 files + 10 DB integration + 7 API integration = 259 total**
+
+| Component | Test File | Tests | Focus |
+|-----------|-----------|-------|-------|
+| PnL Calculator | `src/pnl/calculator.test.ts` | 86 | Trade/funding PnL, position flips, liquidations, summary stats, live unrealized, partial close validation |
+| Decimal Utilities | `src/utils/decimal.test.ts` | 32 | Type conversion, precision, aggregation |
+| REST Client | `src/hyperliquid/client.test.ts` | 17 | API calls, retries, error handling |
+| WebSocket Client | `src/hyperliquid/websocket.test.ts` | 11 | Subscriptions, reconnect, heartbeat, allMids filtering |
+| API: Traders | `src/api/routes/v1/traders.test.ts` | 14 | PnL, stats, positions, subscribe/unsubscribe |
+| API: Leaderboard | `src/api/routes/v1/leaderboard.test.ts` | 12 | Ranking, timeframes, metrics |
+| API: Metrics | `src/api/routes/metrics.test.ts` | 4 | Prometheus endpoint, custom gauges |
+| API: Health | `src/api/routes/health.test.ts` | 6 | Liveness and readiness probes |
+| Leaderboard Repo | `src/storage/db/repositories/leaderboard.repo.test.ts` | 7 | Delta SQL, time boundaries |
+| Stream: with-retry | `src/streams/operators/with-retry.test.ts` | 6 | Retry count, backoff |
+| Stream: circuit-breaker | `src/streams/operators/circuit-breaker.test.ts` | 6 | Open/close/half-open states |
+| Hybrid Stream | `src/streams/sources/hybrid.stream.test.ts` | 9 | WS fills, polling, 10-user limit, cleanup |
+| Trader Discovery | `src/streams/sources/trader-discovery.stream.test.ts` | 11 | Address extraction, queueing, coin subs |
+| Price Service | `src/state/price-service.test.ts` | 6 | allMids cache, unknown coin handling |
+| Backfill Job | `src/jobs/backfill.test.ts` | 8 | State chaining, progress, resumption |
+| Auto-Subscribe | `src/jobs/auto-subscribe.test.ts` | 7 | Queue processing, validation, rate limiting |
+| **Subtotal** | **16 files** | **242** | |
+| DB Integration | `src/__integration__/db.test.ts` | 10 | CRUD on all tables (gated by `INTEGRATION=1`) |
+| API Integration | `src/__integration__/hyperliquid-api.test.ts` | 7 | Live API shape validation (gated by `INTEGRATION=1`) |
+
 ## Test Categories
 
-### 1. Unit Tests
+### 1. Unit Tests — PnL Calculator (86 tests)
 
-#### PnL Calculator (`src/pnl/calculator.test.ts`)
+The most critical tests covering financial calculations:
 
-The most critical tests - these verify our financial calculations are correct.
+| Area | Tests | What's Covered |
+|------|-------|----------------|
+| Core PnL | 39 | `applyTrade`, `applyFunding`, `createSnapshot`, position updates, edge cases |
+| Position flips | 5 | Long→short, short→long, flip detection via `startPosition` |
+| Liquidations | 3 | `isLiquidation` flag, count tracking |
+| WsTrade parsing | 8 | `computeFillFromWsTrade`, buyer/seller mapping, side derivation |
+| Summary stats | 8 | Peak, trough, max drawdown, V-recovery, all-negative, monotonic |
+| Live unrealized | 5 | Mark price lookup, multi-position, missing prices |
+| Partial close validation | 5 | `validateClosedPnl`, divergence calculation, zero positions |
+| Edge cases | 13 | Dust amounts, whale positions, negative fees (maker rebates), zero-size |
 
-| Function | Test Cases | Why |
-|----------|------------|-----|
-| `createInitialState` | Zero initialization | Ensures clean slate for new traders |
-| `applyTrade` | Single trade, multiple trades, accumulation | Core trade processing logic |
-| `applyFunding` | Positive/negative funding | Funding affects realized PnL |
-| `calculatePnL` | Combined trades + funding | Integration of all PnL components |
-| `calculateUnrealizedPnlForPosition` | Long profit, short profit, losing positions | Mark-to-market calculations |
-| `updatePositions` | Add, update, remove positions | Position state management |
-| `createSnapshot` | Snapshot generation | Point-in-time capture |
-
-**Edge Cases to Cover:**
-- Zero-size positions (position closed)
-- Very small decimals (dust amounts like 0.00000001)
-- Very large numbers (whale positions)
-- Negative fees (maker rebates)
-- Position flips (long → short)
-
-#### Hyperliquid Client (`src/hyperliquid/client.test.ts`)
-
-| Function | Test Cases | Why |
-|----------|------------|-----|
-| `isValidAddress` | Valid/invalid addresses | Input validation |
-| `fetchClearinghouseState` | Success, retry, failure | API resilience |
-| `fetchUserFills` | Response parsing | Data transformation |
-| `fetchUserFunding` | Response parsing | Data transformation |
-
-#### Decimal Utilities (`src/utils/decimal.test.ts`)
-
-| Function | Test Cases | Why |
-|----------|------------|-----|
-| `toDecimal` | String, number, Decimal inputs | Type conversion |
-| `formatDecimal` | Various precision levels | Output formatting |
-| `sum`, `mean` | Arrays of decimals | Aggregation accuracy |
-
-### 2. API Route Tests
+### 2. API Route Tests (36 tests)
 
 Using Fastify's `inject()` method for HTTP-level testing without starting a server.
 
-#### Traders Routes (`src/api/routes/v1/traders.test.ts`)
+| Route Group | Tests | Endpoints |
+|-------------|-------|-----------|
+| Traders | 14 | `/v1/traders/:address/pnl`, `/stats`, `/positions`, `/subscribe`, `/unsubscribe`, `/backfill` |
+| Leaderboard | 12 | `/v1/leaderboard`, `/v1/leaderboard/info` |
+| Health | 6 | `/health`, `/ready` |
+| Metrics | 4 | `/metrics` (Prometheus format, custom gauges) |
 
-| Endpoint | Test Cases | Why |
-|----------|------------|-----|
-| `GET /v1/traders/:address/pnl` | Valid request, invalid address, not found | Core query endpoint |
-| `GET /v1/traders/:address/stats` | Returns correct shape | Statistics endpoint |
-| `POST /v1/traders/:address/subscribe` | Creates trader, idempotent | Subscription flow |
+### 3. Stream & Operator Tests (32 tests)
 
-#### Leaderboard Routes (`src/api/routes/v1/leaderboard.test.ts`)
+| Component | Tests | Focus |
+|-----------|-------|-------|
+| with-retry | 6 | Retry count, exponential backoff timing |
+| circuit-breaker | 6 | State transitions, threshold, reset |
+| Hybrid stream | 9 | WS fills, polling loop, 10-user cap, deferred snapshot |
+| Trader discovery | 11 | Address extraction from trades, coin subscriptions, queue dedup |
 
-| Endpoint | Test Cases | Why |
-|----------|------------|-----|
-| `GET /v1/leaderboard` | Default params, custom params | Ranking accuracy |
+### 4. Integration Tests (17 tests, gated)
 
-#### Health Routes (`src/api/routes/health.test.ts`)
+Run with `INTEGRATION=1 npx vitest run src/__integration__/`:
 
-| Endpoint | Test Cases | Why |
-|----------|------------|-----|
-| `GET /health` | Returns ok | Liveness probe |
-| `GET /ready` | DB/Redis checks | Readiness probe |
-
-### 3. RxJS Stream Tests (Marble Testing)
-
-Marble testing provides a visual way to test async streams using ASCII diagrams.
-
-#### Operators (`src/streams/operators/*.test.ts`)
-
-| Operator | Test Cases | Why |
-|----------|------------|-----|
-| `withRetry` | Retry count, backoff timing | Resilience |
-| `withCircuitBreaker` | Open/close/half-open states | Fault tolerance |
-| `withMetrics` | Counter increments | Observability |
-
-**Marble Diagram Example:**
-```
-Source:   --a--b--#          (# = error)
-Expected: --a--b----a--b--|  (retried once)
-```
-
-### 4. Integration Tests
-
-End-to-end flows with real (or containerized) dependencies.
-
-| Flow | Description |
-|------|-------------|
-| Subscribe → Query | New trader subscription returns empty, then data |
-| Backfill → Query | Historical data appears after backfill |
-| Stream Processing | Position updates flow through pipeline |
-
-## Test Configuration
-
-### Vitest Setup (`vitest.config.ts`)
-
-```typescript
-{
-  test: {
-    globals: true,
-    environment: 'node',
-    include: ['src/**/*.test.ts'],
-    coverage: {
-      provider: 'v8',
-      reporter: ['text', 'html'],
-      exclude: ['**/*.test.ts']
-    }
-  }
-}
-```
-
-### Mocking Strategy
-
-| Dependency | Mock Approach |
-|------------|---------------|
-| Hyperliquid API | `vi.mock()` with fake responses |
-| Database | In-memory or mock query function |
-| Redis | `ioredis-mock` or manual mock |
-| Time | `vi.useFakeTimers()` for timing tests |
+| Suite | Tests | What |
+|-------|-------|------|
+| DB integration | 10 | Insert/query/upsert on traders, snapshots, trades, funding, data_gaps |
+| API integration | 7 | Live Hyperliquid API shape validation, PnL cross-check |
 
 ## Running Tests
 
 ```bash
-# Run all tests
+# Unit tests (242 tests)
 npm test
 
 # Watch mode
@@ -146,12 +95,32 @@ npm run test:watch
 # With coverage
 npm run test:coverage
 
+# Integration tests (requires running DB or live API)
+INTEGRATION=1 npx vitest run src/__integration__/
+
 # Run specific file
 npx vitest run src/pnl/calculator.test.ts
 
 # Run tests matching pattern
 npx vitest run -t "applyTrade"
 ```
+
+## Test Configuration
+
+### Vitest Setup (`vitest.config.ts`)
+
+- Globals enabled, Node.js environment
+- `src/__integration__/` excluded by default (only runs with `INTEGRATION=1`)
+- Coverage via V8 provider
+
+### Mocking Strategy
+
+| Dependency | Mock Approach |
+|------------|---------------|
+| Hyperliquid API | `vi.mock()` with fake responses |
+| Database | In-memory or mock query function |
+| Redis | Manual mock |
+| Time | `vi.useFakeTimers()` for timing tests |
 
 ## Coverage Goals
 
@@ -168,34 +137,33 @@ npx vitest run -t "applyTrade"
 src/
 ├── pnl/
 │   ├── calculator.ts
-│   └── calculator.test.ts      # Unit tests
-├── api/
-│   └── routes/
-│       ├── health.ts
-│       ├── health.test.ts      # Route tests
-│       └── v1/
-│           ├── traders.ts
-│           └── traders.test.ts
+│   └── calculator.test.ts             # 86 tests — PnL math, edge cases
+├── api/routes/
+│   ├── health.test.ts                 # 6 tests — liveness/readiness
+│   ├── metrics.test.ts                # 4 tests — Prometheus
+│   └── v1/
+│       ├── traders.test.ts            # 14 tests — trader endpoints
+│       └── leaderboard.test.ts        # 12 tests — ranking endpoints
 ├── hyperliquid/
-│   ├── client.ts
-│   └── client.test.ts          # Client tests
+│   ├── client.test.ts                 # 17 tests — REST client
+│   └── websocket.test.ts             # 11 tests — WS client
 ├── streams/
-│   └── operators/
-│       ├── with-retry.ts
-│       └── with-retry.test.ts  # Marble tests
-└── utils/
-    ├── decimal.ts
-    └── decimal.test.ts         # Utility tests
-```
-
-## CI Integration
-
-Tests run on every push via GitHub Actions:
-
-```yaml
-- name: Run tests
-  run: npm test
-
-- name: Upload coverage
-  uses: codecov/codecov-action@v3
+│   ├── operators/
+│   │   ├── with-retry.test.ts         # 6 tests
+│   │   └── circuit-breaker.test.ts    # 6 tests
+│   └── sources/
+│       ├── hybrid.stream.test.ts      # 9 tests
+│       └── trader-discovery.stream.test.ts  # 11 tests
+├── state/
+│   └── price-service.test.ts          # 6 tests
+├── storage/db/repositories/
+│   └── leaderboard.repo.test.ts       # 7 tests
+├── jobs/
+│   ├── backfill.test.ts               # 8 tests
+│   └── auto-subscribe.test.ts         # 7 tests
+├── utils/
+│   └── decimal.test.ts                # 32 tests
+└── __integration__/
+    ├── db.test.ts                     # 10 tests (INTEGRATION=1)
+    └── hyperliquid-api.test.ts        # 7 tests (INTEGRATION=1)
 ```

@@ -273,6 +273,7 @@ src/
 │   │   ├── trades.ts            # Recent trades feed
 │   │   └── status.ts            # System status + data_integrity
 │   ├── dashboard.ts             # Single-page UI (Alpine.js + Chart.js)
+│   ├── metrics.ts               # Prometheus /metrics endpoint (prom-client)
 │   └── server.ts                # Fastify setup + Swagger
 ├── hyperliquid/
 │   ├── client.ts                # REST API client (weight-based rate budget)
@@ -285,7 +286,7 @@ src/
 │   ├── calculator.ts            # PnL math + computeFillFromWsTrade
 │   └── types.ts
 ├── state/
-│   ├── trader-state.ts          # Shared in-memory state
+│   ├── trader-state.ts          # Shared in-memory state + tid deduplication
 │   ├── price-service.ts         # allMids real-time price cache
 │   └── gap-detector.ts          # Startup gap detection + data_gaps persistence
 ├── storage/
@@ -318,6 +319,7 @@ npm run test:coverage # Run tests with coverage
 npm run migrate      # Run database migrations
 npm run discovery    # Test trader discovery
 npm run verify       # Verify PnL against Hyperliquid API
+npx tsx scripts/verify-1d.ts  # Compare 24h PnL with Hyperliquid for all traders
 ```
 
 ## Requirements Compliance
@@ -358,11 +360,16 @@ npm run test:coverage
 |----------|-------------|
 | [REQUIREMENTS.md](./REQUIREMENTS.md) | Original assignment requirements |
 | [DESIGN.md](./DESIGN.md) | ADRs for all technical choices (11 decisions) |
-| [CHANGELOG.md](./CHANGELOG.md) | Version history (v1.0.0 through v1.3.0) |
+| [CHANGELOG.md](./CHANGELOG.md) | Version history (v0.1.0 through v1.5.0) |
 | [AUDIT.md](./AUDIT.md) | Code audit findings and resolutions |
-| [RATE_LIMITS.md](./RATE_LIMITS.md) | Hyperliquid rate limit analysis |
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | Detailed system architecture |
 | [ARCHITECTURE_OVERVIEW.md](./ARCHITECTURE_OVERVIEW.md) | Executive summary |
+| [RATE_LIMITS.md](./RATE_LIMITS.md) | Hyperliquid rate limit analysis |
+| [RATE_LIMIT_ANALYSIS.md](./RATE_LIMIT_ANALYSIS.md) | Weight-based budget breakdown |
+| [TESTING.md](./TESTING.md) | Testing strategy and coverage goals |
+| [VERIFICATION.md](./VERIFICATION.md) | PnL verification guide and scripts |
+| [DATA_COMPLETENESS.md](./DATA_COMPLETENESS.md) | Trader discovery and data pipeline |
+| [LEADERBOARD.md](./LEADERBOARD.md) | Leaderboard design and data accuracy |
 
 ## License
 
